@@ -11,6 +11,7 @@ import (
 	"github.com/TsubasaBE/go-xlsb/biff12"
 	"github.com/TsubasaBE/go-xlsb/record"
 	"github.com/TsubasaBE/go-xlsb/stringtable"
+	"github.com/TsubasaBE/go-xlsb/styles"
 )
 
 // Dimension describes the used range of a worksheet.
@@ -72,7 +73,6 @@ type Cell struct {
 	// Style is the 0-based index into the workbook's cell-format (XF) table.
 	// It is 0 for cells whose record carried no explicit style or for empty
 	// padding cells emitted in dense (sparse=false) mode.
-	// Use Worksheet.IsDateCell(cell.Style) to test whether the format is a date.
 	Style int
 }
 
@@ -93,25 +93,29 @@ type Worksheet struct {
 	// MergeCells contains all merged-cell ranges defined in the sheet.
 	MergeCells []MergeArea
 
-	data         []byte                   // full binary payload
-	dataOffset   int64                    // byte offset of SHEETDATA record payload
-	hasSheetData bool                     // true once SHEETDATA record was found
-	stringTable  *stringtable.StringTable // may be nil
-	rels         map[string]string        // relationship ID → URL (may be nil)
-	dateXFs      map[int]bool             // XF indices that represent date/time formats; may be nil
+	data         []byte                           // full binary payload
+	dataOffset   int64                            // byte offset of SHEETDATA record payload
+	hasSheetData bool                             // true once SHEETDATA record was found
+	stringTable  *stringtable.StringTable         // may be nil
+	rels         map[string]string                // relationship ID → URL (may be nil)
+	stylesTable  styles.StyleTable                // XF style table; may be nil/empty
+	formatFn     func(v any, styleIdx int) string // injected from workbook; may be nil
 }
 
 // New parses the pre-loaded binary data and optional rels XML for a worksheet.
 // stringTable may be nil if the workbook has no shared strings.
-// dateXFs maps XF indices to true when the corresponding number format is a
-// date/time format; it may be nil when styles information is unavailable.
-func New(name string, data []byte, relsData []byte, st *stringtable.StringTable, dateXFs map[int]bool) (*Worksheet, error) {
+// st is the workbook's XF style table; it may be nil/empty when styles
+// information is unavailable.
+// formatFn is an optional closure (typically wb.FormatCell) that renders a
+// cell value to its display string; it may be nil.
+func New(name string, data []byte, relsData []byte, st *stringtable.StringTable, stylesTable styles.StyleTable, formatFn func(v any, styleIdx int) string) (*Worksheet, error) {
 	ws := &Worksheet{
 		Name:        name,
 		Hyperlinks:  make(map[[2]int]string),
 		data:        data,
 		stringTable: st,
-		dateXFs:     dateXFs,
+		stylesTable: stylesTable,
+		formatFn:    formatFn,
 	}
 	if len(relsData) > 0 {
 		rels, err := parseRelsXML(relsData)
@@ -125,12 +129,18 @@ func New(name string, data []byte, relsData []byte, st *stringtable.StringTable,
 	return ws, nil
 }
 
-// IsDateCell reports whether the given XF style index maps to a date or
-// datetime number format according to the workbook's styles.
-// It returns false when styles information is unavailable or the index is
-// not in the date-format set.
-func (ws *Worksheet) IsDateCell(style int) bool {
-	return ws.dateXFs[style] // nil map returns false safely
+// FormatCell renders the cell value using the workbook's FormatCell function
+// (injected at construction time via New).  When no format function was
+// provided — e.g. when the worksheet was constructed without style information
+// — it falls back to fmt.Sprint(cell.V) for non-nil values and "" for nil.
+func (ws *Worksheet) FormatCell(cell Cell) string {
+	if ws.formatFn != nil {
+		return ws.formatFn(cell.V, cell.Style)
+	}
+	if cell.V == nil {
+		return ""
+	}
+	return fmt.Sprint(cell.V)
 }
 
 // Rows iterates over the worksheet rows in order, calling yield for each one.

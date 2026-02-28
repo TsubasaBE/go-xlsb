@@ -11,8 +11,10 @@ import (
 	"strings"
 
 	"github.com/TsubasaBE/go-xlsb/biff12"
+	"github.com/TsubasaBE/go-xlsb/numfmt"
 	"github.com/TsubasaBE/go-xlsb/record"
 	"github.com/TsubasaBE/go-xlsb/stringtable"
+	"github.com/TsubasaBE/go-xlsb/styles"
 	"github.com/TsubasaBE/go-xlsb/worksheet"
 )
 
@@ -43,7 +45,10 @@ type Workbook struct {
 	zf          *zip.Reader     // always non-nil
 	sheets      []sheetEntry
 	stringTable *stringtable.StringTable
-	dateXFs     map[int]bool // XF indices whose numFmtId is a date/time format
+	// Styles is the full XF style table parsed from xl/styles.bin.  It is
+	// exported so that callers who need low-level access to format metadata
+	// can inspect it directly; normal callers should use FormatCell.
+	Styles styles.StyleTable
 	// Date1904 is true when the workbook uses the 1904 date system (base
 	// date 1904-01-01, serial 0 = 1904-01-01). Most workbooks use the
 	// default 1900 system (Date1904 == false). Pass this value to
@@ -130,6 +135,35 @@ func (wb *Workbook) SheetVisibility(name string) int {
 		}
 	}
 	return -1
+}
+
+// FormatCell renders the cell value v using the XF style at index styleIdx.
+// Pass cell.V as v and cell.Style as styleIdx.
+//
+// The returned string is the same display string that Excel would show in the
+// cell.  Use this alongside Rows() to get both the raw value (cell.V) and
+// the formatted display string:
+//
+//	for row := range sheet.Rows(false) {
+//	    for _, cell := range row {
+//	        raw       := cell.V
+//	        formatted := wb.FormatCell(cell.V, cell.Style)
+//	        _ = raw
+//	        _ = formatted
+//	    }
+//	}
+//
+// When styleIdx is out of range (e.g. because styles.bin was absent), the
+// function falls back to fmt.Sprint(v).
+func (wb *Workbook) FormatCell(v any, styleIdx int) string {
+	if styleIdx < 0 || styleIdx >= len(wb.Styles) {
+		if v == nil {
+			return ""
+		}
+		return fmt.Sprint(v)
+	}
+	s := wb.Styles[styleIdx]
+	return numfmt.FormatValue(v, s.NumFmtID, s.FormatStr, wb.Date1904)
 }
 
 // Close releases the underlying ZIP file handle.
@@ -220,26 +254,25 @@ func (wb *Workbook) parseSharedStrings() error {
 	return nil
 }
 
-// parseStyles reads xl/styles.bin and builds the dateXFs set.
+// parseStyles reads xl/styles.bin and builds the StyleTable.
 // Failures are silently ignored so that workbooks without styles.bin
-// (or with malformed styles) still open correctly — date detection
-// will simply return false for all cells.
+// (or with malformed styles) still open correctly — FormatCell will fall
+// back to fmt.Sprint for all cells.
 func (wb *Workbook) parseStyles() error {
 	data, err := wb.readZipEntry("xl/styles.bin")
 	if err != nil {
 		return nil // optional
 	}
-	dateXFs, err := parseDateXFs(data)
+	st, err := parseStyleTable(data)
 	if err != nil {
 		return nil // degrade gracefully
 	}
-	wb.dateXFs = dateXFs
+	wb.Styles = st
 	return nil
 }
 
-// parseDateXFs parses the BIFF12 styles stream and returns a set of XF
-// indices (0-based, into the CellXfs table) that correspond to date or
-// datetime number formats.
+// parseStyleTable parses the BIFF12 styles stream and returns a StyleTable
+// mapping each XF index to its resolved XFStyle.
 //
 // BrtFmt record layout (MS-XLSB §2.4.697):
 //
@@ -251,15 +284,13 @@ func (wb *Workbook) parseStyles() error {
 //	ixfe      uint16   (parent XF index; ignored)
 //	numFmtId  uint16
 //	...       (remaining fields ignored)
-func parseDateXFs(data []byte) (map[int]bool, error) {
+func parseStyleTable(data []byte) (styles.StyleTable, error) {
 	// fmts maps numFmtId → format string for custom formats (id >= 164).
 	fmts := make(map[int]string)
-	// result maps xfIndex → true for date/time XFs in the CellXfs section.
-	result := make(map[int]bool)
+	var table styles.StyleTable
 
 	rdr := record.NewReader(bytes.NewReader(data))
 	inCellXfs := false
-	xfIndex := 0
 
 	for {
 		recID, recData, err := rdr.Next()
@@ -283,7 +314,6 @@ func parseDateXFs(data []byte) (map[int]bool, error) {
 
 		case biff12.CellXfs:
 			inCellXfs = true
-			xfIndex = 0
 
 		case biff12.CellXfsEnd:
 			inCellXfs = false
@@ -294,24 +324,25 @@ func parseDateXFs(data []byte) (map[int]bool, error) {
 			}
 			// BrtXF: ixfe(uint16) + numFmtId(uint16) + ...
 			if len(recData) < 4 {
-				xfIndex++
+				table = append(table, styles.XFStyle{})
 				continue
 			}
 			// ixfe is at bytes 0–1; numFmtId is at bytes 2–3.
 			numFmtID := int(binary.LittleEndian.Uint16(recData[2:4]))
 			fmtStr := fmts[numFmtID] // empty string for built-in IDs
-			if isDateFormatID(numFmtID, fmtStr) {
-				result[xfIndex] = true
-			}
-			xfIndex++
+			table = append(table, styles.XFStyle{
+				NumFmtID:  numFmtID,
+				FormatStr: fmtStr,
+			})
 		}
 	}
-	return result, nil
+	return table, nil
 }
 
 // isDateFormatID is the internal counterpart of xlsb.IsDateFormat.
-// It is duplicated here to keep workbook free of an import cycle against the
-// root xlsb package.  Both functions must stay in sync.
+// It is kept here (rather than delegating to styles.isDateFormatID) so that
+// workbook remains self-contained when the styles package is not imported by
+// callers.  All three copies must stay in sync.
 func isDateFormatID(id int, formatStr string) bool {
 	switch {
 	case id >= 14 && id <= 17:
@@ -378,7 +409,7 @@ func (wb *Workbook) openSheet(entry sheetEntry) (*worksheet.Worksheet, error) {
 	relsPath := zipPath[:lastSlash+1] + "_rels/" + zipPath[lastSlash+1:] + ".rels"
 	relsData, _ := wb.readZipEntry(relsPath) // ignore error — it's optional
 
-	return worksheet.New(entry.name, data, relsData, wb.stringTable, wb.dateXFs)
+	return worksheet.New(entry.name, data, relsData, wb.stringTable, wb.Styles, wb.FormatCell)
 }
 
 // readZipEntry reads the full contents of a named entry from the ZIP archive.

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/TsubasaBE/go-xlsb"
+	"github.com/TsubasaBE/go-xlsb/numfmt"
 	"github.com/TsubasaBE/go-xlsb/record"
 	"github.com/TsubasaBE/go-xlsb/stringtable"
 	"github.com/TsubasaBE/go-xlsb/workbook"
@@ -1199,7 +1200,221 @@ func buildXLSBWithStylesBin(t *testing.T) []byte {
 	return zipBuf.Bytes()
 }
 
-func TestIsDateCell(t *testing.T) {
+// ── FormatValue (numfmt package) ──────────────────────────────────────────────
+
+func TestFormatValueGeneral(t *testing.T) {
+	tests := []struct {
+		name string
+		v    any
+		want string
+	}{
+		{"nil", nil, ""},
+		{"bool true", true, "TRUE"},
+		{"bool false", false, "FALSE"},
+		{"string passthrough", "hello", "hello"},
+		{"integer float", float64(42), "42"},
+		{"fractional float", float64(3.14), "3.14"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := numfmt.FormatValue(tc.v, 0, "", false)
+			if got != tc.want {
+				t.Errorf("FormatValue(%v) = %q, want %q", tc.v, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFormatValueDecimal covers Cat F: decimal precision formatting.
+func TestFormatValueDecimal(t *testing.T) {
+	tests := []struct {
+		name   string
+		v      float64
+		fmtStr string
+		want   string
+	}{
+		{"0.00 with 303.6", 303.6, "0.00", "303.60"},
+		{"0.00 with zero", 0.0, "0.00", "0.00"},
+		{"0.## trims trailing zero", 1.5, "0.##", "1.5"},
+		{"0 integer only", 42.9, "0", "43"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := numfmt.FormatValue(tc.v, 164, tc.fmtStr, false)
+			if got != tc.want {
+				t.Errorf("FormatValue(%v, %q) = %q, want %q", tc.v, tc.fmtStr, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFormatValueLiteralPrefix covers Cat D: literal prefix + number.
+func TestFormatValueLiteralPrefix(t *testing.T) {
+	tests := []struct {
+		name   string
+		v      float64
+		fmtStr string
+		want   string
+	}{
+		{"E prefix", 40013205, `"E"0`, "E40013205"},
+		{"unit suffix kg", 18000, `0" kg"`, "18000 kg"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := numfmt.FormatValue(tc.v, 164, tc.fmtStr, false)
+			if got != tc.want {
+				t.Errorf("FormatValue(%v, %q) = %q, want %q", tc.v, tc.fmtStr, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFormatValuePercent covers percent scaling.
+func TestFormatValuePercent(t *testing.T) {
+	tests := []struct {
+		name   string
+		v      float64
+		fmtStr string
+		want   string
+	}{
+		{"0% with 0.75", 0.75, "0%", "75%"},
+		{"0.00% with 0.1234", 0.1234, "0.00%", "12.34%"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := numfmt.FormatValue(tc.v, 164, tc.fmtStr, false)
+			if got != tc.want {
+				t.Errorf("FormatValue(%v, %q) = %q, want %q", tc.v, tc.fmtStr, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFormatValueDateLocale covers Cat B: built-in locale date (numFmtID=14, m/d/yy).
+func TestFormatValueDateLocale(t *testing.T) {
+	// Excel serial 45412 = 2024-04-30 (1900 system).
+	// m/d/yy → "4/30/24"
+	got := numfmt.FormatValue(float64(45412), 14, "", false)
+	want := "4/30/24"
+	if got != want {
+		t.Errorf("FormatValue(45412, 14) = %q, want %q", got, want)
+	}
+}
+
+// TestFormatValueElapsed covers Cat C: elapsed/duration format ([h]:mm:ss).
+func TestFormatValueElapsed(t *testing.T) {
+	// Serial 0.270833... = 6.5 hours = 6:30:00
+	serial := 6.5 / 24.0
+	got := numfmt.FormatValue(serial, 46, "", false) // built-in 46 = [h]:mm:ss
+	want := "6:30:00"
+	if got != want {
+		t.Errorf("FormatValue(elapsed) = %q, want %q", got, want)
+	}
+}
+
+// TestFormatValueDateLong covers Cat E: long-form datetime (DDDD DD/MM/YYYY).
+func TestFormatValueDateLong(t *testing.T) {
+	// Excel serial 45285 = 2023-12-25 (Monday).
+	// "DDDD DD/MM/YYYY" → "Monday 25/12/2023"
+	got := numfmt.FormatValue(float64(45285), 164, "DDDD DD/MM/YYYY", false)
+	want := "Monday 25/12/2023"
+	if got != want {
+		t.Errorf("FormatValue(45285, DDDD DD/MM/YYYY) = %q, want %q", got, want)
+	}
+}
+
+// TestFormatValueDateShort covers Cat G: short date formats.
+func TestFormatValueDateShort(t *testing.T) {
+	tests := []struct {
+		name   string
+		serial float64
+		fmtStr string
+		want   string
+	}{
+		// 45119 = 2023-07-12
+		{"DD-MMM", 45119, "DD-MMM", "12-Jul"},
+		// 45367 = 2024-03-16
+		{"MM-DD-YY", 45367, "MM-DD-YY", "03-16-24"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := numfmt.FormatValue(tc.serial, 164, tc.fmtStr, false)
+			if got != tc.want {
+				t.Errorf("FormatValue(%v, %q) = %q, want %q", tc.serial, tc.fmtStr, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFormatValueNegativeSections covers multi-section formats (positive/negative).
+func TestFormatValueNegativeSections(t *testing.T) {
+	tests := []struct {
+		name   string
+		v      float64
+		fmtStr string
+		want   string
+	}{
+		{"positive section", 42.5, "0.00;(0.00)", "42.50"},
+		{"negative section parentheses", -42.5, "0.00;(0.00)", "(42.50)"},
+		{"zero falls to positive section (2-section)", 0.0, "0.00;(0.00)", "0.00"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := numfmt.FormatValue(tc.v, 164, tc.fmtStr, false)
+			if got != tc.want {
+				t.Errorf("FormatValue(%v, %q) = %q, want %q", tc.v, tc.fmtStr, got, tc.want)
+			}
+		})
+	}
+}
+
+// ── WorkbookFormatCell end-to-end ─────────────────────────────────────────────
+
+// TestWorkbookFormatCell builds an in-memory .xlsb with styles.bin and verifies
+// that wb.FormatCell renders cells correctly for each XF style entry.
+func TestWorkbookFormatCell(t *testing.T) {
+	data := buildXLSBWithStylesBin(t)
+	wb, err := workbook.OpenReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatalf("OpenReader: %v", err)
+	}
+	defer wb.Close()
+
+	// The styles.bin built by buildStylesBin has:
+	//   xf[0]: numFmtId=14  (built-in date m/d/yy)
+	//   xf[1]: numFmtId=164 (custom "yyyy-mm-dd")
+	//   xf[2]: numFmtId=0   (General)
+
+	// Excel serial 45285 = 2023-12-25.
+	serial := float64(45285)
+
+	tests := []struct {
+		name     string
+		v        any
+		styleIdx int
+		want     string
+	}{
+		{"date built-in m/d/yy", serial, 0, "12/25/23"},
+		{"date custom yyyy-mm-dd", serial, 1, "2023-12-25"},
+		{"general float", serial, 2, "45285"},
+		{"nil value", nil, 0, ""},
+		{"string passthrough", "hello", 2, "hello"},
+		{"out-of-range style falls back", serial, 99, "45285"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := wb.FormatCell(tc.v, tc.styleIdx)
+			if got != tc.want {
+				t.Errorf("FormatCell(%v, %d) = %q, want %q", tc.v, tc.styleIdx, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestWorksheetFormatCell verifies that ws.FormatCell delegates to the injected
+// formatFn (i.e. wb.FormatCell) and produces the same result.
+func TestWorksheetFormatCell(t *testing.T) {
 	data := buildXLSBWithStylesBin(t)
 	wb, err := workbook.OpenReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
@@ -1212,24 +1427,43 @@ func TestIsDateCell(t *testing.T) {
 		t.Fatalf("Sheet(1): %v", err)
 	}
 
-	tests := []struct {
-		style int
-		want  bool
-		desc  string
-	}{
-		{0, true, "xf[0] numFmtId=14 (built-in date)"},
-		{1, true, "xf[1] numFmtId=164 custom yyyy-mm-dd"},
-		{2, false, "xf[2] numFmtId=0 (General)"},
-		{99, false, "out-of-range style returns false"},
+	// Excel serial 45285 = 2023-12-25; xf[1] = "yyyy-mm-dd".
+	cell := worksheet.Cell{V: float64(45285), Style: 1}
+	got := sheet.FormatCell(cell)
+	want := "2023-12-25"
+	if got != want {
+		t.Errorf("ws.FormatCell = %q, want %q", got, want)
 	}
+}
 
-	for _, tc := range tests {
-		t.Run(tc.desc, func(t *testing.T) {
-			got := sheet.IsDateCell(tc.style)
-			if got != tc.want {
-				t.Errorf("IsDateCell(%d) = %v, want %v", tc.style, got, tc.want)
-			}
-		})
+// TestWorkbookStylesTablePopulated verifies that wb.Styles is populated after
+// parsing a workbook that includes xl/styles.bin.
+func TestWorkbookStylesTablePopulated(t *testing.T) {
+	data := buildXLSBWithStylesBin(t)
+	wb, err := workbook.OpenReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatalf("OpenReader: %v", err)
+	}
+	defer wb.Close()
+
+	if len(wb.Styles) != 3 {
+		t.Fatalf("len(wb.Styles) = %d, want 3", len(wb.Styles))
+	}
+	// xf[0]: numFmtId=14 (built-in date)
+	if !wb.Styles.IsDate(0) {
+		t.Error("Styles.IsDate(0) = false, want true (numFmtId=14)")
+	}
+	// xf[1]: numFmtId=164 (custom yyyy-mm-dd)
+	if !wb.Styles.IsDate(1) {
+		t.Error("Styles.IsDate(1) = false, want true (custom yyyy-mm-dd)")
+	}
+	// xf[2]: numFmtId=0 (General) — not a date
+	if wb.Styles.IsDate(2) {
+		t.Error("Styles.IsDate(2) = true, want false (numFmtId=0 General)")
+	}
+	// out-of-range
+	if wb.Styles.IsDate(99) {
+		t.Error("Styles.IsDate(99) = true, want false (out of range)")
 	}
 }
 
