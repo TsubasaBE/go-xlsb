@@ -1368,6 +1368,52 @@ func TestFormatValueNegativeSections(t *testing.T) {
 	}
 }
 
+// TestFormatValueFallback verifies that FormatValue never silently drops a
+// numeric value when the format string produces no renderable output.
+func TestFormatValueFallback(t *testing.T) {
+	tests := []struct {
+		name    string
+		v       float64
+		fmtID   int
+		fmtStr  string
+		wantNot string // result must NOT be this
+		desc    string
+	}{
+		{
+			// A custom format string consisting only of a colour token —
+			// renderNumber produces no output from its token walk and must
+			// fall back to renderGeneral.
+			name:    "number: colour-only format",
+			v:       42.5,
+			fmtID:   164,
+			fmtStr:  "[Red]",
+			wantNot: "",
+			desc:    "colour-only format must not return empty string",
+		},
+		{
+			// A date-typed format string (ID 164 with 'D' present so
+			// isDateFormat returns true) that after isDateFormat detection
+			// produces only colour tokens — renderDateTime produces no
+			// calendar output and must fall back to renderGeneral.
+			name:    "date: colour-only format",
+			v:       45285, // 2023-12-25
+			fmtID:   164,
+			fmtStr:  "[Red]D",
+			wantNot: "",
+			desc:    "date colour-only format must not return empty string",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Helper()
+			got := numfmt.FormatValue(tc.v, tc.fmtID, tc.fmtStr, false)
+			if got == tc.wantNot {
+				t.Errorf("FormatValue(%v, %q): %s; got %q", tc.v, tc.fmtStr, tc.desc, got)
+			}
+		})
+	}
+}
+
 // ── WorkbookFormatCell end-to-end ─────────────────────────────────────────────
 
 // TestWorkbookFormatCell builds an in-memory .xlsb with styles.bin and verifies

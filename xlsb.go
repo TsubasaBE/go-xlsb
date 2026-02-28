@@ -18,13 +18,31 @@
 //	    }
 //	}
 //
+// # Cell formatting
+//
+// [Rows] always returns raw values (nil, string, float64, or bool).  To obtain
+// the display string that Excel would show — respecting number formats, date
+// formats, custom formats, and so on — call [workbook.Workbook.FormatCell]:
+//
+//	for row := range sheet.Rows(false) {
+//	    for _, cell := range row {
+//	        raw       := cell.V
+//	        formatted := wb.FormatCell(cell.V, cell.Style)
+//	        _, _ = raw, formatted
+//	    }
+//	}
+//
+// [worksheet.Worksheet.FormatCell] is a convenience wrapper on the sheet that
+// accepts a [worksheet.Cell] directly.
+//
 // # Dates
 //
-// Excel stores dates as floating-point serial numbers.  Use [ConvertDateEx] to
-// turn such a value into a [time.Time], passing wb.Date1904 so the correct
-// date system is used:
+// Excel stores dates as floating-point serial numbers.  [FormatCell] handles
+// date rendering automatically when the cell's number format is a date or
+// datetime format.  For direct access to the underlying [time.Time] value use
+// [ConvertDateEx], passing wb.Date1904 so the correct date system is used:
 //
-//	if f, ok := cell.V.(float64); ok && sheet.IsDateCell(cell.Style) {
+//	if f, ok := cell.V.(float64); ok && wb.Styles.IsDate(cell.Style) {
 //	    t, err := xlsb.ConvertDateEx(f, wb.Date1904)
 //	}
 //
@@ -35,8 +53,7 @@
 //
 // [IsDateFormat] checks whether a number-format ID (and optional custom format
 // string) represents a date or datetime format.  It is a lower-level helper for
-// callers that build their own cell-rendering logic without going through
-// [worksheet.Worksheet.IsDateCell].
+// callers that inspect format metadata without going through [workbook.Workbook.FormatCell].
 package xlsb
 
 import (

@@ -2,7 +2,7 @@
 
 A Go port of [pyxlsb](https://github.com/willtrnr/pyxlsb) by [William Turner](https://github.com/willtrnr). All credit for the original design, format research, and reference implementation goes to him.
 
-Reads Microsoft Excel Binary Workbook (`.xlsb`) files. Pure Go, no CGO, no external dependencies.
+Reads Microsoft Excel Binary Workbook (`.xlsb`) files. Pure Go, no CGO.
 
 ## Installation
 
@@ -62,11 +62,13 @@ wb, err := xlsb.OpenReader(bytes.NewReader(data), int64(len(data)))
 | Field / Method | Description |
 |---|---|
 | `Date1904 bool` | True when the workbook uses the 1904 date system |
+| `Styles styles.StyleTable` | Full XF style table parsed from `xl/styles.bin` |
 | `Sheets() []string` | Ordered list of all sheet names (visible and hidden) |
 | `Sheet(idx int) (*worksheet.Worksheet, error)` | 1-based index lookup |
 | `SheetByName(name string) (*worksheet.Worksheet, error)` | Case-insensitive name lookup |
 | `SheetVisible(name string) bool` | Report whether a named sheet is visible |
 | `SheetVisibility(name string) int` | Return visibility level: `SheetVisible` (0), `SheetHidden` (1), `SheetVeryHidden` (2), or -1 if not found |
+| `FormatCell(v any, styleIdx int) string` | Render a raw cell value to its Excel display string |
 | `Close() error` | Release the underlying file handle |
 
 #### Sheet visibility constants
@@ -87,7 +89,7 @@ workbook.SheetVeryHidden  = 2 // hidden; only accessible via VBA / programmatic 
 | `Hyperlinks map[[2]int]string` | `[row, col]` to relationship ID |
 | `MergeCells []MergeArea` | All merged cell ranges in the sheet |
 | `Rows(sparse bool) func(yield func([]Cell) bool)` | Range-over-func row iterator |
-| `IsDateCell(style int) bool` | Report whether a cell's XF style index maps to a date/datetime format |
+| `FormatCell(cell Cell) string` | Render a cell to its Excel display string (delegates to `wb.FormatCell`) |
 
 `Rows(false)` emits empty rows between data rows, matching pyxlsb's default behaviour. Pass `true` to skip empty rows.
 
@@ -98,7 +100,7 @@ type Cell struct {
     R     int // 0-based row index
     C     int // 0-based column index
     V     any // nil | string | float64 | bool
-    Style int // 0-based XF index; use Worksheet.IsDateCell(cell.Style) to detect dates
+    Style int // 0-based XF index into wb.Styles
 }
 ```
 
@@ -132,16 +134,50 @@ type MergeArea struct {
 }
 ```
 
-### Dates
+### `styles.StyleTable`
 
-Excel stores dates as floating-point serial numbers (days since 1900-01-00, fractional part is time of day).
+`wb.Styles` is a `styles.StyleTable` (a `[]styles.XFStyle` slice indexed by XF index).
 
-Use `ConvertDateEx` together with `wb.Date1904` and `sheet.IsDateCell` to correctly identify and convert date cells:
+| Method | Description |
+|---|---|
+| `IsDate(s int) bool` | Report whether XF index `s` maps to a date/datetime format |
+| `FmtStr(s int) string` | Return the raw custom format string for XF index `s` |
+
+```go
+type XFStyle struct {
+    NumFmtID  int    // numFmtId from the BrtXF record (0–163 built-in, ≥164 custom)
+    FormatStr string // custom format string; empty for built-in IDs
+}
+```
+
+`styles.BuiltInNumFmt` is a `map[int]string` of canonical format strings for built-in IDs (0–49) as defined by ECMA-376 §18.8.30.
+
+## Cell formatting
+
+`Rows` always returns raw values (`nil`, `string`, `float64`, or `bool`). To obtain the display string that Excel would show — respecting number formats, date formats, elapsed time, literal prefixes, decimal precision, and so on — call `wb.FormatCell`:
 
 ```go
 for row := range sheet.Rows(false) {
     for _, cell := range row {
-        if f, ok := cell.V.(float64); ok && sheet.IsDateCell(cell.Style) {
+        raw       := cell.V
+        formatted := wb.FormatCell(cell.V, cell.Style)
+        fmt.Printf("raw=%v  formatted=%s\n", raw, formatted)
+    }
+}
+```
+
+`sheet.FormatCell(cell)` is a convenience wrapper that accepts a `Cell` directly and delegates to `wb.FormatCell`.
+
+## Dates
+
+Excel stores dates as floating-point serial numbers (days since 1900-01-00, fractional part is time of day).
+
+`wb.FormatCell` handles date rendering automatically when the cell's number format is a date or datetime format. For direct access to the underlying `time.Time` value, use `wb.Styles.IsDate` to detect date cells and `ConvertDateEx` to convert them:
+
+```go
+for row := range sheet.Rows(false) {
+    for _, cell := range row {
+        if f, ok := cell.V.(float64); ok && wb.Styles.IsDate(cell.Style) {
             t, err := xlsb.ConvertDateEx(f, wb.Date1904)
             if err == nil {
                 fmt.Println(t)
