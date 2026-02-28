@@ -37,6 +37,9 @@ import (
 	"github.com/TsubasaBE/go-xlsb/workbook"
 )
 
+// Version is the current version of the go-xlsb library.
+const Version = "0.2.0"
+
 // Open opens the named .xlsb file.  The caller must call Close on the returned
 // Workbook when done.
 func Open(name string) (*workbook.Workbook, error) {
