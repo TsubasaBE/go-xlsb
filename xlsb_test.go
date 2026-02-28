@@ -3051,6 +3051,99 @@ func TestFormatValueSecondsOnlyFormat(t *testing.T) {
 
 // ── Chinese AM/PM (上午/下午) ──────────────────────────────────────────────────
 
+// TestBuiltInNumFmtID20and21 verifies that built-in format IDs 20 and 21 produce
+// zero-padded hours (hh), matching Excel and excelize behaviour.
+func TestBuiltInNumFmtID20and21(t *testing.T) {
+	t.Helper()
+	// Serial for 09:05:03 on any day: 9 hours + 5 min + 3 sec = 32703 seconds.
+	// fractional day = 32703 / 86400
+	serial := float64(32703) / 86400.0
+
+	tests := []struct {
+		name     string
+		numFmtID int
+		want     string
+	}{
+		// ID 20 = "hh:mm" — zero-padded hours and minutes.
+		{
+			name:     "ID 20 hh:mm zero-padded",
+			numFmtID: 20,
+			want:     "09:05",
+		},
+		// ID 21 = "hh:mm:ss" — zero-padded hours, minutes, and seconds.
+		{
+			name:     "ID 21 hh:mm:ss zero-padded",
+			numFmtID: 21,
+			want:     "09:05:03",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Helper()
+			got := numfmt.FormatValue(serial, tc.numFmtID, "", false)
+			if got != tc.want {
+				t.Errorf("FormatValue(serial=%v, ID=%d) = %q, want %q", serial, tc.numFmtID, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFormatValueEraTokens verifies that E/EE era tokens fall back to the
+// Gregorian year for non-CJK locales (matching excelize behaviour), and that
+// G/GG/GGG era-name tokens produce no output.
+func TestFormatValueEraTokens(t *testing.T) {
+	t.Helper()
+	// Serial 45285 = 2023-12-25 in the 1900 date system.
+	serial := float64(45285)
+
+	tests := []struct {
+		name   string
+		fmtStr string
+		want   string
+	}{
+		// E alone — Gregorian year as integer (matches excelize).
+		{
+			name:   "E token: Gregorian year",
+			fmtStr: "E",
+			want:   "2023",
+		},
+		// EE — same as E for western locales.
+		{
+			name:   "EE token: Gregorian year",
+			fmtStr: "EE",
+			want:   "2023",
+		},
+		// E combined with other date tokens — only the year part of E, the
+		// rest renders normally.
+		{
+			name:   "E/MM/DD combined",
+			fmtStr: "E/MM/DD",
+			want:   "2023/12/25",
+		},
+		// G token — silent for western locales; remaining tokens still render.
+		{
+			name:   "G token: silent, date still renders",
+			fmtStr: "GYYYY",
+			want:   "2023",
+		},
+		// GGG token — also silent.
+		{
+			name:   "GGG token: silent, date still renders",
+			fmtStr: "GGGYYYY",
+			want:   "2023",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Helper()
+			got := numfmt.FormatValue(serial, 164, tc.fmtStr, false)
+			if got != tc.want {
+				t.Errorf("FormatValue(45285, %q) = %q, want %q", tc.fmtStr, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestFormatValueChineseAmPm verifies that the Chinese AM/PM token (上午/下午)
 // is rendered correctly in date/time format strings.
 func TestFormatValueChineseAmPm(t *testing.T) {

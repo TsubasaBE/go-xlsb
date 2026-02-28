@@ -3,8 +3,8 @@
 // [workbook.Workbook.FormatCell] and [worksheet.Worksheet.FormatCell].
 //
 // The public entry point is [FormatValue].  All format-string parsing is
-// delegated to [github.com/xuri/nfp]; this package only implements the
-// rendering logic on top of the resulting token stream.
+// delegated to the github.com/xuri/nfp package; this package only implements
+// the rendering logic on top of the resulting token stream.
 package numfmt
 
 import (
@@ -271,6 +271,7 @@ func isDateFormat(id int, fmtStr string) bool {
 	// scan unquoted content for date token characters.
 	inDoubleQuote := false
 	inBracket := false
+	var prev rune
 	for _, ch := range fmtStr {
 		switch {
 		case inDoubleQuote:
@@ -291,6 +292,16 @@ func isDateFormat(id int, fmtStr string) bool {
 			ch == 'h' || ch == 'H' ||
 			ch == 's' || ch == 'S':
 			return true
+		case ch == 'e' || ch == 'E':
+			// E/e is a scientific-notation exponent marker when preceded by a
+			// digit placeholder (0, #, ?) — in that context it is NOT a date
+			// token. Only treat it as the Japanese era date token otherwise.
+			if prev != '0' && prev != '#' && prev != '?' && prev != '.' {
+				return true
+			}
+		}
+		if !inDoubleQuote && !inBracket {
+			prev = ch
 		}
 	}
 	return false
@@ -596,6 +607,22 @@ func renderDateToken(upper string, t time.Time, serial float64, hasAmPm bool, la
 	// Excel "MMMMM" renders J F M A M J J A S O N D (first letter of month).
 	case "MMMMM":
 		return string([]rune(t.Month().String())[:1])
+
+	// ── Era tokens (Japanese/CJK) ────────────────────────────────────────────
+	// E / EE are Japanese imperial era tokens.  For non-CJK (western) locales
+	// excelize falls back to the Gregorian year as a plain integer.
+	case "E", "EE":
+		return fmt.Sprintf("%d", t.Year())
+
+	// G / GG / GGG are era-name tokens (e.g. "R" / "Rei" / "Reiwa" in Japanese).
+	// For non-CJK locales excelize produces no output — silently ignored.
+	case "G", "GG", "GGG", "GGGG", "GGGGG":
+		return ""
+
+	// R / RR are era-abbreviation tokens used in some Japanese locale formats.
+	// For non-CJK locales produce no output (matches excelize western behaviour).
+	case "R", "RR":
+		return ""
 
 	// ── Buddhist Era / Gregorian calendar mode indicators ────────────────────
 	// B1 = Buddhist Era, B2 = Gregorian. Excel uses these as calendar-system

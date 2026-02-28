@@ -145,9 +145,9 @@ func (ws *Worksheet) FormatCell(cell Cell) string {
 
 // Rows iterates over the worksheet rows in order, calling yield for each one.
 //
-// When sparse is false (the default) empty rows between used rows are emitted
-// as slices of nil-valued Cells (matching pyxlsb behaviour).  When sparse is
-// true only rows that contain at least one record are yielded.
+// When sparse is false, empty rows between used rows are emitted as slices of
+// nil-valued Cells (matching pyxlsb behaviour).  When sparse is true only rows
+// that contain at least one record are yielded.
 //
 // Merged-cell regions are reflected faithfully from the underlying binary
 // storage: only the anchor cell (top-left of the region) carries a value;

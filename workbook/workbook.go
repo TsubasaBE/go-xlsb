@@ -342,7 +342,11 @@ func parseStyleTable(data []byte) (styles.StyleTable, error) {
 // isDateFormatID is the internal counterpart of xlsb.IsDateFormat.
 // It is kept here (rather than delegating to styles.isDateFormatID) so that
 // workbook remains self-contained when the styles package is not imported by
-// callers.  All three copies must stay in sync.
+// callers.  All three internal copies (here, styles, numfmt) must stay in sync.
+//
+// Unlike the public xlsb.IsDateFormat, this function treats time-only built-in
+// IDs 18–21 as date/time formats (they are used in rendering via numfmt and
+// must round-trip correctly through FormatCell).
 func isDateFormatID(id int, formatStr string) bool {
 	switch {
 	case id >= 14 && id <= 22:
@@ -362,6 +366,7 @@ func isDateFormatID(id int, formatStr string) bool {
 	}
 	inDoubleQuote := false
 	inBracket := false
+	var prev rune
 	for _, ch := range formatStr {
 		switch {
 		case inDoubleQuote:
@@ -382,6 +387,13 @@ func isDateFormatID(id int, formatStr string) bool {
 			ch == 'h' || ch == 'H' ||
 			ch == 's' || ch == 'S':
 			return true
+		case ch == 'e' || ch == 'E':
+			if prev != '0' && prev != '#' && prev != '?' && prev != '.' {
+				return true
+			}
+		}
+		if !inDoubleQuote && !inBracket {
+			prev = ch
 		}
 	}
 	return false

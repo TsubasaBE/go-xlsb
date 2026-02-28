@@ -20,7 +20,7 @@
 //
 // # Cell formatting
 //
-// [Rows] always returns raw values (nil, string, float64, or bool).  To obtain
+// [worksheet.Worksheet.Rows] always returns raw values (nil, string, float64, or bool).  To obtain
 // the display string that Excel would show — respecting number formats, date
 // formats, custom formats, and so on — call [workbook.Workbook.FormatCell]:
 //
@@ -184,9 +184,16 @@ func ConvertDateEx(date float64, date1904 bool) (time.Time, error) {
 // formatStr is ignored; for custom formats (id >= 164) formatStr must be the
 // format string read from the BrtFmt record in xl/styles.bin.
 //
-// Built-in date/time IDs follow ECMA-376 §18.8.30:
+// Built-in date/time IDs follow ECMA-376 §18.8.30.  This function recognises
+// the following as date or datetime formats:
 //
 //	14–17, 22, 27–36, 45–47, 50–58
+//
+// Note: built-in time-only IDs 18–21 (h:mm AM/PM, h:mm:ss AM/PM, h:mm,
+// h:mm:ss) are intentionally excluded; those formats carry no calendar date
+// component and converting them to [time.Time] is usually not meaningful.
+// Use the internal isDateFormatID copies (in workbook/ and styles/) when
+// rendering number-formatted output that includes time-only formats.
 //
 // For custom formats the function scans the unquoted portion of formatStr for
 // any of the characters d, D, m, M, y, Y, h, H.  Sections enclosed in double
@@ -211,6 +218,7 @@ func IsDateFormat(id int, formatStr string) bool {
 	// Custom format: scan unquoted characters for date/time tokens.
 	inDoubleQuote := false
 	inBracket := false
+	var prev rune
 	for _, ch := range formatStr {
 		switch {
 		case inDoubleQuote:
@@ -231,6 +239,13 @@ func IsDateFormat(id int, formatStr string) bool {
 			ch == 'h' || ch == 'H' ||
 			ch == 's' || ch == 'S':
 			return true
+		case ch == 'e' || ch == 'E':
+			if prev != '0' && prev != '#' && prev != '?' && prev != '.' {
+				return true
+			}
+		}
+		if !inDoubleQuote && !inBracket {
+			prev = ch
 		}
 	}
 	return false

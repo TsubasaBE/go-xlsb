@@ -24,8 +24,14 @@ type StyleTable []XFStyle
 // number format.  It returns false when s is out of range or when styles
 // information is unavailable (nil / empty table).
 //
+// This method uses the broader internal date-detection logic that includes
+// time-only built-in IDs 18–21 (h:mm AM/PM etc.).  The public
+// [xlsb.IsDateFormat] function deliberately excludes those IDs because they
+// carry no calendar-date component.  Use IsDate when you need to decide
+// whether FormatCell will render a cell as a date or time string.
+//
 // The logic is intentionally duplicated from workbook.isDateFormatID and
-// xlsb.IsDateFormat to avoid import cycles.  All three copies must stay in
+// xlsb.IsDateFormat to avoid import cycles.  All internal copies must stay in
 // sync.
 func (st StyleTable) IsDate(s int) bool {
 	if s < 0 || s >= len(st) {
@@ -34,7 +40,7 @@ func (st StyleTable) IsDate(s int) bool {
 	return isDateFormatID(st[s].NumFmtID, st[s].FormatStr)
 }
 
-// FormatStr returns the raw format string for style index s, or an empty
+// FmtStr returns the raw format string for style index s, or an empty
 // string when s is out of range.
 func (st StyleTable) FmtStr(s int) string {
 	if s < 0 || s >= len(st) {
@@ -115,10 +121,13 @@ var BuiltInNumFmt = map[int]string{
 // ── date-format detection (copy of workbook.isDateFormatID / xlsb.IsDateFormat) ─
 
 // isDateFormatID reports whether the given numFmtId (and optional custom
-// format string) represents a date or datetime format.  This is the third
-// copy of this logic in the codebase; all copies must stay in sync.  The
-// duplication is intentional to avoid circular imports between workbook/,
-// worksheet/, and styles/.
+// format string) represents a date or datetime format.  This is a shared
+// internal copy used by styles and the rendering engine; all internal copies
+// (styles, workbook, numfmt) must stay in sync.
+//
+// Unlike the public xlsb.IsDateFormat, this function treats time-only built-in
+// IDs 18–21 as date/time formats so that cells with time-only number formats
+// are handled correctly in [StyleTable.IsDate] and during rendering.
 func isDateFormatID(id int, formatStr string) bool {
 	switch {
 	case id >= 14 && id <= 22:
@@ -139,6 +148,7 @@ func isDateFormatID(id int, formatStr string) bool {
 	// Custom format: scan the unquoted portion for date/time token characters.
 	inDoubleQuote := false
 	inBracket := false
+	var prev rune
 	for _, ch := range formatStr {
 		switch {
 		case inDoubleQuote:
@@ -159,6 +169,13 @@ func isDateFormatID(id int, formatStr string) bool {
 			ch == 'h' || ch == 'H' ||
 			ch == 's' || ch == 'S':
 			return true
+		case ch == 'e' || ch == 'E':
+			if prev != '0' && prev != '#' && prev != '?' && prev != '.' {
+				return true
+			}
+		}
+		if !inDoubleQuote && !inBracket {
+			prev = ch
 		}
 	}
 	return false
