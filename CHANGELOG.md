@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-02-28
+
+### Added
+
+- Number formatting (`numfmt` package): full cell value rendering including date/time,
+  scientific notation, fractions, sub-second decimals, currency, text sections, and the
+  `General` format (up to 10 significant digits).
+- Style handling (`styles` package): parse `styles.bin` to resolve per-cell number
+  format IDs; built-in format IDs 5–8, 14, 20–22, 27–36, 37–44, 47, 50–58 are now
+  correctly mapped, including CJK locale fallback date formats.
+- Sheet visibility: `Worksheet.IsHidden()` and `Workbook.HiddenSheets()` methods.
+- Workbook date-system detection: `date1904` flag propagated through all date/time
+  rendering paths so the 1904 date system is handled correctly.
+- Cell error string mapping: Excel error codes (`#NULL!`, `#DIV/0!`, etc.) are now
+  returned as human-readable strings instead of raw byte values.
+- Chinese AM/PM token support (`上午`/`下午`) in `renderDateTime`.
+- Fixed-denominator fraction support (e.g. `# ?/4`, `# ?/8`) via
+  `TokenTypeDenominator` in `renderFraction`.
+- `isDateFormat` detection extended to recognise formats containing `s`/`S` (e.g.
+  `:ss`) across `xlsb.go`, `styles/styles.go`, and `workbook/workbook.go`.
+
+### Fixed
+
+- `renderDateTime`: midnight roll-over — when a fractional serial rounds up to 86400
+  seconds (e.g. one microsecond before midnight), the day now advances instead of
+  clamping to 23:59:59, matching Excel and Excelize behaviour.
+- `renderDateTime` / `convertSerial`: minute/hour rounding now mirrors Excelize's
+  half-second rounding logic (`roundEpsilon` + nearest-second rounding), eliminating
+  off-by-one minute/hour errors near time boundaries.
+- `excelDay` helper: serial < 1 returns day 0 (pure time); Lotus 1-2-3 off-by-one
+  corrected for serials 1–59; fake Feb-29-1900 (serial 60) handled; 1904 date system
+  bypasses 1900-only corrections.
+- Built-in format IDs 20–22 now use zero-padded hours (`hh`) to match Excelize
+  rendering.
+- Built-in format ID 14 corrected from `MM-DD-YY` to `mm-dd-yy`.
+- `renderNumber`: sign wrapper detection for two-section negative formats (e.g. `0;0`
+  applied to `-5` now produces `-5` instead of `5`).
+- `renderElapsed`: `[mm]`/`[ss]` tokens now return total elapsed minutes/seconds
+  without modulo 60, using `int64` to avoid overflow on large serials.
+- `renderNumber`: `@` (text placeholder) on numeric cells now renders as `General`
+  instead of being silently dropped.
+- Guards added in `renderDateTime` and `renderNumber` to prevent silent dropping of
+  numeric values on unexpected token sequences.
+- `isMinuteIndex` pre-scan in `renderDateTime` disambiguates `M`/`MM` as minutes
+  using both look-behind (`H`/`HH`) and look-ahead (`S`/`SS`).
+
 ## [1.0.2] - 2026-02-28
 
 ### Fixed
@@ -59,7 +105,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `docs/official_microsoft_xlsb_format_documentation.pdf` removed from the
   repository; added to `.gitignore`.
 
-[Unreleased]: https://github.com/TsubasaBE/go-xlsb/compare/v1.0.2...HEAD
+[Unreleased]: https://github.com/TsubasaBE/go-xlsb/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/TsubasaBE/go-xlsb/compare/v1.0.2...v1.1.0
 [1.0.2]: https://github.com/TsubasaBE/go-xlsb/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/TsubasaBE/go-xlsb/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/TsubasaBE/go-xlsb/compare/v0.2.0...v1.0.0
