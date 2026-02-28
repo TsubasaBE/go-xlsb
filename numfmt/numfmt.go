@@ -241,6 +241,12 @@ func renderDateTime(serial float64, sec nfp.Section, date1904 bool) string {
 		}
 	}
 
+	// Guard: if no token produced any output (e.g. the format string contained
+	// only unrecognised or purely decorative tokens), fall back to the raw
+	// serial so the numeric value is never silently dropped.
+	if sb.Len() == 0 {
+		return renderGeneral(serial)
+	}
 	return sb.String()
 }
 
@@ -521,6 +527,13 @@ func renderNumber(val float64, sec nfp.Section, sections []nfp.Section) string {
 	// If the format had no placeholder tokens at all, just emit the integer.
 	if !intConsumed && !afterDecimal {
 		sb.WriteString(intStr)
+	}
+
+	// Guard: if nothing was written (e.g. a format string whose only tokens
+	// are colours, conditions, or other non-output tokens), fall back to the
+	// raw value so the numeric value is never silently dropped.
+	if sb.Len() == 0 {
+		return renderGeneral(val)
 	}
 
 	return sb.String()
