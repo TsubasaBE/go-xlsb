@@ -38,7 +38,7 @@ import (
 )
 
 // Version is the current version of the go-xlsb library.
-const Version = "0.2.0"
+const Version = "1.0.0"
 
 // Open opens the named .xlsb file.  The caller must call Close on the returned
 // Workbook when done.

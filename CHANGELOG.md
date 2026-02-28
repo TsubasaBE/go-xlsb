@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-02-28
+
+### Added
+
+- Merge-cell value propagation in `Rows()`: non-anchor cells in a vertical merge
+  now carry the anchor cell's value, matching the visual appearance in Excel.
+  Previously, only the top-left anchor cell of a merged region held a value;
+  all other rows in the merge returned `nil`.
+
 ## [0.2.0] - 2026-02-28
 
 ### Added
@@ -19,6 +28,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ConvertDate` helper to convert Excel serial date floats to `time.Time`.
 - Exported `Version` constant (`"0.2.0"`).
 - Internal packages: `biff12`, `record`, `stringtable`, `workbook`, `worksheet`.
+- Parsing and exposure of `MergeCells` (`[]MergeArea`) on `Worksheet`, including
+  `MergeArea` type with `R`, `C`, `H`, `W` fields for the merged range.
+- Integration test suite (`xlsb_integration_test.go`) covering real `.xlsb` fixtures.
+- Developer probe tool (`_probe.go`, build-ignored).
 
-[Unreleased]: https://github.com/TsubasaBE/go-xlsb/compare/v0.2.0...HEAD
+### Removed
+
+- `docs/official_microsoft_xlsb_format_documentation.pdf` removed from the
+  repository; added to `.gitignore`.
+
+[Unreleased]: https://github.com/TsubasaBE/go-xlsb/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/TsubasaBE/go-xlsb/compare/v0.2.0...v1.0.0
 [0.2.0]: https://github.com/TsubasaBE/go-xlsb/releases/tag/v0.2.0
