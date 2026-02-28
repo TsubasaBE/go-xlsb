@@ -214,7 +214,7 @@ func renderDateTime(serial float64, sec nfp.Section, date1904 bool) string {
 
 		case nfp.TokenTypeDateTimes:
 			upper := strings.ToUpper(tok.TValue)
-			s := renderDateToken(upper, t, serial, hasAmPm, lastWasHour)
+			s := renderDateToken(upper, t, serial, hasAmPm, lastWasHour, date1904)
 			sb.WriteString(s)
 			// Track whether this token was an hour (H / HH) for M/MM disambiguation.
 			lastWasHour = upper == "H" || upper == "HH"
@@ -250,8 +250,50 @@ func renderDateTime(serial float64, sec nfp.Section, date1904 bool) string {
 	return sb.String()
 }
 
+// excelDay returns the calendar day number for a serial, mirroring excelize's
+// daysHandler logic.  date1904 selects the 1904 date system.
+//
+// For 1900-system (date1904=false):
+//   - serial < 1  → 0   (pure time value, no date component)
+//   - 1 ≤ serial < 60 → use serial+1 to fix Lotus 1-2-3 day-off-by-one
+//   - 60 ≤ serial < 61 → 29 (fake Feb-29-1900)
+//   - serial ≥ 61 → normal calendar day from t
+//
+// For 1904-system (date1904=true):
+//   - serial < 1 → 0
+//   - otherwise → t.Day() (no off-by-one; the 1904 epoch has no Lotus bug)
+func excelDay(t time.Time, serial float64, date1904 bool) int {
+	if serial < 1 {
+		return 0
+	}
+	if date1904 {
+		return t.Day()
+	}
+	switch {
+	case serial < 60:
+		// CRITICAL: Lotus 1-2-3 bug — serial 1 = Jan 1 1900 but the base date
+		// arithmetic is off-by-one for serials 1–59.  Adding 1 corrects the day.
+		return convertSerialToTime1900(serial + 1).Day()
+	case serial < 61:
+		return 29 // fake Feb-29-1900
+	default:
+		return t.Day()
+	}
+}
+
+// convertSerialToTime1900 converts a 1900-system serial to time.Time for day
+// extraction only.  It is a lightweight helper used exclusively by excelDay.
+func convertSerialToTime1900(serial float64) time.Time {
+	base := time.Date(1899, 12, 31, 0, 0, 0, 0, time.UTC)
+	intPart := int(serial)
+	if intPart >= 61 {
+		return base.Add(time.Duration(intPart-1) * 24 * time.Hour)
+	}
+	return base.Add(time.Duration(intPart) * 24 * time.Hour)
+}
+
 // renderDateToken renders a single date/time token value (already upper-cased).
-func renderDateToken(upper string, t time.Time, serial float64, hasAmPm bool, lastWasHour bool) string {
+func renderDateToken(upper string, t time.Time, serial float64, hasAmPm bool, lastWasHour bool, date1904 bool) string {
 	switch upper {
 	// ── year ────────────────────────────────────────────────────────────────
 	case "YYYY":
@@ -281,9 +323,9 @@ func renderDateToken(upper string, t time.Time, serial float64, hasAmPm bool, la
 	case "DDD":
 		return t.Weekday().String()[:3] // "Sun" … "Sat"
 	case "DD":
-		return fmt.Sprintf("%02d", t.Day())
+		return fmt.Sprintf("%02d", excelDay(t, serial, date1904))
 	case "D":
-		return strconv.Itoa(t.Day())
+		return strconv.Itoa(excelDay(t, serial, date1904))
 
 	// ── hour ─────────────────────────────────────────────────────────────────
 	case "HH":

@@ -12,6 +12,36 @@ go get github.com/TsubasaBE/go-xlsb
 
 Requires Go 1.22 or later (uses range-over-func iterators).
 
+> This library is intentionally read-only. Writing `.xlsb` files is out of scope and will never be implemented.
+
+## Status
+
+This package is incomplete. The core reading path works — cell values, number formatting, dates, merged cells, hyperlinks — but large parts of the XLSB spec are not yet parsed.
+
+### Implemented
+
+Cell values: blank, number, boolean, string (shared string table), error, and formula results for all of the above. Rich text strings are read as plain text; the individual formatting runs are discarded.
+
+Worksheet metadata: sheet list with visibility levels, used-range dimension, column definitions (width and style), merged cell ranges, and hyperlinks. Hyperlinks are stored as a `[row, col] -> rId` map; there is currently no public method to resolve an `rId` to its URL.
+
+Number formatting via `wb.FormatCell`: integer and decimal rendering, thousands separator, percent, literal prefix/suffix, multi-section formats, date and datetime formats (built-in and custom), elapsed time (`[h]:mm:ss`), AM/PM, day-of-week and month names, and both the 1900 and 1904 date systems.
+
+### Not implemented
+
+Cell styling: font (name, size, weight, style, underline, color), fill (background color and pattern), borders, and alignment (horizontal, vertical, wrap, indent, rotation). The XF records are parsed only far enough to extract the number format ID; everything else is skipped.
+
+Named cell styles, conditional formatting, and differential formatting (Dxfs) are not parsed.
+
+Worksheet features not yet read: row height, hidden rows, default row and column sizes, sheet view properties (freeze panes, zoom, active cell), page setup (margins, print options, headers and footers), tables, AutoFilter, and comments.
+
+Chart sheets open without error but always return zero rows. No chart data is exposed.
+
+Workbook features not yet read: defined names, external references, data connections, OLE objects, and drawings.
+
+Password-protected files are not supported.
+
+Number format gaps: scientific notation (`0.00E+00`), fraction formats (`# ?/?`), and accounting alignment.
+
 ## Usage
 
 ```go
