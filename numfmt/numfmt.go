@@ -526,6 +526,17 @@ func renderDateToken(upper string, t time.Time, serial float64, hasAmPm bool, la
 			return "A"
 		}
 		return "P"
+
+	// ── single-letter month initial ──────────────────────────────────────────
+	// Excel "MMMMM" renders J F M A M J J A S O N D (first letter of month).
+	case "MMMMM":
+		return string([]rune(t.Month().String())[:1])
+
+	// ── Buddhist Era / Gregorian calendar mode indicators ────────────────────
+	// B1 = Buddhist Era, B2 = Gregorian. Excel uses these as calendar-system
+	// switches; we silently ignore them (matches excelize behaviour).
+	case "B1", "B2":
+		return ""
 	}
 	return ""
 }
@@ -552,6 +563,9 @@ func renderElapsed(upper string, serial float64) string {
 // This matches excelize's timeFromExcelTime behaviour which adds 1e-9 to avoid
 // floating-point drift causing floor/truncate to land one second below a whole
 // second boundary (e.g. 0.4999999999 → 0.5000000000 → rounds up correctly).
+// When rounding pushes the result to 86400 seconds (exactly midnight), the
+// overflow is rolled into the next calendar day (intPart++) rather than being
+// clamped to 23:59:59 — matching excelize's time.Round-based implementation.
 const roundEpsilon = 1e-9
 
 // convertSerial converts an Excel serial to time.Time, handling both date
@@ -583,16 +597,19 @@ func convertSerial(serial float64, date1904 bool) (time.Time, error) {
 	}
 	if fracSec < 0 {
 		fracSec = 0
-	} else if fracSec >= 86400 {
-		fracSec = 86399
 	}
+	// When rounding pushes fracSec to 86400 (midnight), roll over to the next
+	// day rather than clamping to 23:59:59.  This matches excelize's behaviour:
+	// it uses time.Round which naturally carries the overflow into the date part.
+	dayRollover := int(fracSec / 86400)
+	fracSec = fracSec % 86400
 	if date1904 {
 		base := time.Date(1904, 1, 1, 0, 0, 0, 0, time.UTC)
-		intPart := int(serial)
+		intPart := int(serial) + dayRollover
 		return base.Add(time.Duration(intPart)*24*time.Hour + time.Duration(fracSec)*time.Second), nil
 	}
 	base := time.Date(1899, 12, 31, 0, 0, 0, 0, time.UTC)
-	intPart := int(serial)
+	intPart := int(serial) + dayRollover
 	var t time.Time
 	switch {
 	case intPart == 0:
