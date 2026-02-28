@@ -228,7 +228,8 @@ func IsDateFormat(id int, formatStr string) bool {
 		case ch == 'd' || ch == 'D' ||
 			ch == 'm' || ch == 'M' ||
 			ch == 'y' || ch == 'Y' ||
-			ch == 'h' || ch == 'H':
+			ch == 'h' || ch == 'H' ||
+			ch == 's' || ch == 'S':
 			return true
 		}
 	}

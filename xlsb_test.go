@@ -1295,7 +1295,7 @@ func TestFormatValuePercent(t *testing.T) {
 // TestFormatValueDateLocale covers Cat B: built-in locale date (numFmtID=14, m/d/yy).
 func TestFormatValueDateLocale(t *testing.T) {
 	// Excel serial 45412 = 2024-04-30 (1900 system).
-	// MM-DD-YY (excelize ground truth for built-in ID 14) → "04-30-24"
+	// mm-dd-yy (excelize ground truth for built-in ID 14) → "04-30-24"
 	got := numfmt.FormatValue(float64(45412), 14, "", false)
 	want := "04-30-24"
 	if got != want {
@@ -1442,7 +1442,7 @@ func TestWorkbookFormatCell(t *testing.T) {
 		styleIdx int
 		want     string
 	}{
-		{"date built-in m/d/yy -> MM-DD-YY", serial, 0, "12-25-23"},
+		{"date built-in m/d/yy -> mm-dd-yy", serial, 0, "12-25-23"},
 		{"date custom yyyy-mm-dd", serial, 1, "2023-12-25"},
 		{"general float", serial, 2, "45285"},
 		{"nil value", nil, 0, ""},
@@ -2313,6 +2313,8 @@ func TestBuiltInNumFmtIDs(t *testing.T) {
 		{42, `_($* #,##0_);_($* (#,##0);_($* "-"_);_(@_)`},
 		{43, `_(* #,##0.00_);_(* (#,##0.00);_(* "-"??_);_(@_)`},
 		{44, `_($* #,##0.00_);_($* (#,##0.00);_($* "-"??_);_(@_)`},
+		// ID 14: excelize canonical value is "mm-dd-yy" (lowercase), not "MM-DD-YY"
+		{14, "mm-dd-yy"},
 		// IDs fixed in Batch 1
 		{22, "m/d/yy hh:mm"},
 		{37, `(#,##0_);(#,##0)`},
@@ -2612,10 +2614,8 @@ func TestFormatValueMilliseconds(t *testing.T) {
 			serial:   serial5123ms,
 			fmtStr:   "mm:ss.000",
 			numFmtID: 164,
-			// Note: leading 'mm' without a preceding hour token is rendered as
-			// month (01=January) by the current implementation; full
-			// hour-or-seconds lookahead is a Batch 4 improvement.
-			want: "01:05.123",
+			// mm before ss is now correctly disambiguated as minutes (Batch 4 fix).
+			want: "00:05.123",
 		},
 		{
 			name:     "h:mm:ss.00 two centisecond digits",
@@ -2700,6 +2700,401 @@ func TestRenderGeneralLargeNumbers(t *testing.T) {
 			got := numfmt.FormatValue(tc.v, 0, "", false)
 			if got != tc.want {
 				t.Errorf("FormatValue(%v, General) = %q, want %q", tc.v, got, tc.want)
+			}
+		})
+	}
+}
+
+// ── Batch 4 tests ─────────────────────────────────────────────────────────────
+
+// TestFormatValueMmmmm verifies that the MMMMM token renders the single-letter
+// month initial for each calendar month (J F M A M J J A S O N D).
+func TestFormatValueMmmmm(t *testing.T) {
+	t.Helper()
+	// Serials for the 1st of each month in 2023 (1900 date system).
+	// Jan 1 2023 = serial 44927; subsequent months follow.
+	tests := []struct {
+		name   string
+		serial float64
+		want   string
+	}{
+		{"January", 44927, "J"},
+		{"February", 44958, "F"},
+		{"March", 44986, "M"},
+		{"April", 45017, "A"},
+		{"May", 45047, "M"},
+		{"June", 45078, "J"},
+		{"July", 45108, "J"},
+		{"August", 45139, "A"},
+		{"September", 45170, "S"},
+		{"October", 45200, "O"},
+		{"November", 45231, "N"},
+		{"December", 45261, "D"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Helper()
+			got := numfmt.FormatValue(tc.serial, 164, "MMMMM", false)
+			if got != tc.want {
+				t.Errorf("FormatValue(MMMMM, %v) = %q, want %q", tc.serial, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFormatValueMBeforeSS verifies that "m" immediately before "ss" is
+// treated as minutes (not month) even with no preceding hour token.
+func TestFormatValueMBeforeSS(t *testing.T) {
+	t.Helper()
+	// Serial for exactly 1 minute 2 seconds past midnight on 2023-12-25.
+	// Fractional day = 62 / 86400.
+	serial := float64(45285) + 62.0/86400.0
+	got := numfmt.FormatValue(serial, 164, "m:ss", false)
+	want := "1:02"
+	if got != want {
+		t.Errorf("FormatValue(m:ss, %v) = %q, want %q", serial, got, want)
+	}
+}
+
+// TestFormatValueFixedDenominator verifies that fixed-denominator fraction
+// formats (e.g. "# ?/4", "# ?/8") produce the correct numerator.
+func TestFormatValueFixedDenominator(t *testing.T) {
+	t.Helper()
+	tests := []struct {
+		name   string
+		v      float64
+		fmtStr string
+		want   string
+	}{
+		{
+			name:   "# ?/4: 1.75 → 1 3/4",
+			v:      1.75,
+			fmtStr: "# ?/4",
+			want:   "1 3/4",
+		},
+		{
+			name:   "# ?/8: 1.125 → 1 1/8",
+			v:      1.125,
+			fmtStr: "# ?/8",
+			want:   "1 1/8",
+		},
+		{
+			name:   "# ?/4: exact integer 2 shows fixed denominator",
+			v:      2.0,
+			fmtStr: "# ?/4",
+			want:   "2  /4",
+		},
+		{
+			name:   "# ?/8: 0.25 → 2/8",
+			v:      0.25,
+			fmtStr: "# ?/8",
+			want:   " 2/8",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Helper()
+			got := numfmt.FormatValue(tc.v, 164, tc.fmtStr, false)
+			if got != tc.want {
+				t.Errorf("FormatValue(%v, %q) = %q, want %q", tc.v, tc.fmtStr, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFormatValueBuiltInIDs27to36 verifies that built-in number format IDs 27–36
+// produce a date-like string (not the raw serial number) for a known date serial.
+func TestFormatValueBuiltInIDs27to36(t *testing.T) {
+	t.Helper()
+	// Serial 45285 = 2023-12-25 in the 1900 date system.
+	serial := float64(45285)
+	rawSerial := "45285"
+	for id := 27; id <= 36; id++ {
+		id := id
+		t.Run(fmt.Sprintf("ID%d", id), func(t *testing.T) {
+			t.Helper()
+			got := numfmt.FormatValue(serial, id, "", false)
+			if got == rawSerial {
+				t.Errorf("FormatValue(%v, ID=%d) = %q: want a formatted date, not the raw serial", serial, id, got)
+			}
+		})
+	}
+}
+
+// TestFormatValueBuiltInIDs50to58 verifies that built-in number format IDs 50–58
+// produce a date-like string (not the raw serial number) for a known date serial.
+func TestFormatValueBuiltInIDs50to58(t *testing.T) {
+	t.Helper()
+	// Serial 45285 = 2023-12-25 in the 1900 date system.
+	serial := float64(45285)
+	rawSerial := "45285"
+	for id := 50; id <= 58; id++ {
+		id := id
+		t.Run(fmt.Sprintf("ID%d", id), func(t *testing.T) {
+			t.Helper()
+			got := numfmt.FormatValue(serial, id, "", false)
+			if got == rawSerial {
+				t.Errorf("FormatValue(%v, ID=%d) = %q: want a formatted date, not the raw serial", serial, id, got)
+			}
+		})
+	}
+}
+
+// TestFormatValueB1B2Tokens verifies that B1/B2 Buddhist Era / Gregorian
+// calendar mode tokens are silently ignored (matching excelize behaviour)
+// while the rest of the format string still renders correctly.
+func TestFormatValueB1B2Tokens(t *testing.T) {
+	t.Helper()
+	// Serial 45285 = 2023-12-25. "B2" should be ignored; date renders normally.
+	tests := []struct {
+		name   string
+		fmtStr string
+		want   string
+	}{
+		{
+			name:   "B2 prefix ignored, YYYY/MM/DD renders",
+			fmtStr: "B2YYYY/MM/DD",
+			want:   "2023/12/25",
+		},
+		{
+			name:   "B1 prefix ignored, YYYY/MM/DD renders",
+			fmtStr: "B1YYYY/MM/DD",
+			want:   "2023/12/25",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Helper()
+			got := numfmt.FormatValue(float64(45285), 164, tc.fmtStr, false)
+			if got != tc.want {
+				t.Errorf("FormatValue(45285, %q) = %q, want %q", tc.fmtStr, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFormatValueNegativeSectionNoWrapper verifies that a two-section format
+// like "0;0" (negative section contains no sign wrapper) still prepends a
+// minus sign for negative values.
+func TestFormatValueNegativeSectionNoWrapper(t *testing.T) {
+	t.Helper()
+	tests := []struct {
+		name   string
+		v      float64
+		fmtStr string
+		want   string
+	}{
+		{
+			name:   "0;0: negative value gets minus",
+			v:      -5,
+			fmtStr: "0;0",
+			want:   "-5",
+		},
+		{
+			name:   "0;0: positive value no minus",
+			v:      5,
+			fmtStr: "0;0",
+			want:   "5",
+		},
+		{
+			name:   "parenthesis section: no extra minus",
+			v:      -5,
+			fmtStr: `0;(0)`,
+			want:   "(5)",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Helper()
+			got := numfmt.FormatValue(tc.v, 164, tc.fmtStr, false)
+			if got != tc.want {
+				t.Errorf("FormatValue(%v, %q) = %q, want %q", tc.v, tc.fmtStr, got, tc.want)
+			}
+		})
+	}
+}
+
+// ── @ format on numeric cells (ID 49) ─────────────────────────────────────────
+
+// TestFormatValueAtFormatOnNumbers verifies that format ID 49 ("@") applied to
+// a numeric cell renders the number in General style (not as a string literal).
+// Excel's behaviour for @ on a number is to display the raw numeric value
+// identically to General format.
+func TestFormatValueAtFormatOnNumbers(t *testing.T) {
+	tests := []struct {
+		name string
+		v    float64
+		want string
+	}{
+		{"integer", 42, "42"},
+		{"negative integer", -7, "-7"},
+		{"zero", 0, "0"},
+		{"decimal", 3.14, "3.14"},
+		{"large integer", 1234567, "1234567"},
+		{"scientific threshold", 1e11, "1E+11"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Helper()
+			// Use built-in ID 49 ("@") with no custom format string.
+			got := numfmt.FormatValue(tc.v, 49, "", false)
+			if got != tc.want {
+				t.Errorf("FormatValue(%v, 49, \"\") = %q, want %q", tc.v, got, tc.want)
+			}
+			// Also test explicit "@" as custom format string.
+			got2 := numfmt.FormatValue(tc.v, 164, "@", false)
+			if got2 != tc.want {
+				t.Errorf("FormatValue(%v, 164, \"@\") = %q, want %q", tc.v, got2, tc.want)
+			}
+		})
+	}
+}
+
+// ── renderElapsed large serial (int64 overflow guard) ─────────────────────────
+
+// TestFormatValueElapsedLargeSerial verifies that elapsed-time formats ([h]:mm:ss)
+// produce correct output for serials that would overflow a 32-bit int (> ~89 days).
+func TestFormatValueElapsedLargeSerial(t *testing.T) {
+	tests := []struct {
+		name   string
+		serial float64 // fractional days
+		fmtStr string
+		want   string
+	}{
+		// 10000 hours = 416.666... days; [h] must not overflow int32 (max ~2147 hours on int32).
+		{
+			name:   "10000 hours elapsed",
+			serial: 10000.0 / 24.0,
+			fmtStr: "[h]:mm:ss",
+			want:   "10000:00:00",
+		},
+		// 50000 hours = 2083.333... days; exceeds int32 range (32767 hours).
+		{
+			name:   "50000 hours elapsed",
+			serial: 50000.0 / 24.0,
+			fmtStr: "[h]:mm:ss",
+			want:   "50000:00:00",
+		},
+		// 100000 hours.
+		{
+			name:   "100000 hours elapsed",
+			serial: 100000.0 / 24.0,
+			fmtStr: "[h]:mm:ss",
+			want:   "100000:00:00",
+		},
+		// 1.5 hours = 90 minutes elapsed, expressed as [mm]:ss.
+		{
+			name:   "90 minutes elapsed [mm]:ss",
+			serial: 1.5 / 24.0,
+			fmtStr: "[mm]:ss",
+			want:   "90:00",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Helper()
+			got := numfmt.FormatValue(tc.serial, 164, tc.fmtStr, false)
+			if got != tc.want {
+				t.Errorf("FormatValue(%v, %q) = %q, want %q", tc.serial, tc.fmtStr, got, tc.want)
+			}
+		})
+	}
+}
+
+// ── isDateFormat: s/S custom scan ─────────────────────────────────────────────
+
+// TestIsDateFormatSecondsOnly verifies that custom formats containing only 's'/'S'
+// (seconds) tokens are correctly detected as date/time formats.
+func TestIsDateFormatSecondsOnly(t *testing.T) {
+	tests := []struct {
+		name      string
+		id        int
+		formatStr string
+		want      bool
+	}{
+		{"custom ss", 164, "ss", true},
+		{"custom SS", 165, "SS", true},
+		{"custom s", 166, "s", true},
+		{"custom S", 167, "S", true},
+		// s inside double quotes must not trigger
+		{"quoted s", 168, `"seconds"0`, false},
+		// s inside brackets must not trigger
+		{"bracketed s", 169, `[$-409]0.00`, false},
+		// pure number format with no date chars — must remain false
+		{"numeric 0.00", 170, "0.00", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Helper()
+			got := xlsb.IsDateFormat(tc.id, tc.formatStr)
+			if got != tc.want {
+				t.Errorf("IsDateFormat(%d, %q) = %v, want %v", tc.id, tc.formatStr, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFormatValueSecondsOnlyFormat verifies that a pure-seconds custom format
+// actually renders the time component (not a raw number) when applied to a serial.
+func TestFormatValueSecondsOnlyFormat(t *testing.T) {
+	// Serial 0.5 = noon = 43200 seconds into the day.
+	// Format "ss" should render the seconds component: "00" (noon is exactly on a
+	// minute boundary, so seconds = 0).
+	// Serial 0.5 + 30/86400 = noon + 30 seconds.
+	serial := 0.5 + 30.0/86400.0
+	got := numfmt.FormatValue(serial, 164, "ss", false)
+	want := "30"
+	if got != want {
+		t.Errorf("FormatValue(%v, \"ss\") = %q, want %q", serial, got, want)
+	}
+}
+
+// ── Chinese AM/PM (上午/下午) ──────────────────────────────────────────────────
+
+// TestFormatValueChineseAmPm verifies that the Chinese AM/PM token (上午/下午)
+// is rendered correctly in date/time format strings.
+func TestFormatValueChineseAmPm(t *testing.T) {
+	tests := []struct {
+		name   string
+		serial float64 // fractional days
+		fmtStr string
+		want   string
+	}{
+		// Serial 0.25 = 06:00 AM (6/24 of a day).
+		{
+			name:   "morning 上午",
+			serial: 6.0 / 24.0,
+			fmtStr: `上午/下午hh"時"mm"分"`,
+			want:   "上午06時00分",
+		},
+		// Serial 13/24 = 13:00 = 1 PM.
+		{
+			name:   "afternoon 下午",
+			serial: 13.0 / 24.0,
+			fmtStr: `上午/下午hh"時"mm"分"`,
+			want:   "下午01時00分",
+		},
+		// Midnight (serial 0 = 00:00) → 上午.
+		{
+			name:   "midnight 上午",
+			serial: 0.0,
+			fmtStr: `上午/下午hh"時"`,
+			want:   "上午12時",
+		},
+		// Noon (serial 0.5 = 12:00) → 下午.
+		{
+			name:   "noon 下午",
+			serial: 0.5,
+			fmtStr: `上午/下午hh"時"`,
+			want:   "下午12時",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Helper()
+			got := numfmt.FormatValue(tc.serial, 164, tc.fmtStr, false)
+			if got != tc.want {
+				t.Errorf("FormatValue(%v, %q) = %q, want %q", tc.serial, tc.fmtStr, got, tc.want)
 			}
 		})
 	}

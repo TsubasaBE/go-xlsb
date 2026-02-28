@@ -140,7 +140,15 @@ func currencySymbol(tok nfp.Token) string {
 // ── float64 dispatch ──────────────────────────────────────────────────────────
 
 func formatFloat(val float64, numFmtID int, effective string, date1904 bool) string {
-	if effective == "General" || numFmtID == 0 && effective == "General" {
+	if effective == "General" {
+		return renderGeneral(val)
+	}
+
+	// Format ID 49 (or any format whose only section is "@") applied to a
+	// numeric cell: Excel renders the number using General formatting, i.e.
+	// the same as if no format were applied.  The "@" token is a text
+	// placeholder and has no meaningful rendering for numeric values.
+	if effective == "@" {
 		return renderGeneral(val)
 	}
 
@@ -280,7 +288,8 @@ func isDateFormat(id int, fmtStr string) bool {
 		case ch == 'd' || ch == 'D' ||
 			ch == 'm' || ch == 'M' ||
 			ch == 'y' || ch == 'Y' ||
-			ch == 'h' || ch == 'H':
+			ch == 'h' || ch == 'H' ||
+			ch == 's' || ch == 'S':
 			return true
 		}
 	}
@@ -299,14 +308,59 @@ func renderDateTime(serial float64, sec nfp.Section, date1904 bool) string {
 		return renderGeneral(serial)
 	}
 
-	// Pre-scan to determine if any AM/PM token is present — affects hour rendering.
+	// Pre-scan 1: determine if any AM/PM token is present — affects hour rendering.
 	hasAmPm := false
 	for _, tok := range sec.Items {
 		if tok.TType == nfp.TokenTypeDateTimes {
 			upper := strings.ToUpper(tok.TValue)
-			if upper == "AM/PM" || upper == "A/P" {
+			if upper == "AM/PM" || upper == "A/P" || tok.TValue == "上午/下午" {
 				hasAmPm = true
 				break
+			}
+		}
+	}
+
+	// Pre-scan 2: build isMinuteIndex — maps item index → true when an M/MM
+	// token should be rendered as minutes rather than months.
+	//
+	// Rules (matches Excel behaviour):
+	//   (a) M/MM is a minute if the previous DateTimes/ElapsedDateTimes token
+	//       was H/HH (hour), OR
+	//   (b) M/MM is a minute if the next DateTimes token is S/SS (seconds).
+	//
+	// The existing single-pass `lastWasHour` flag handles rule (a) but not (b).
+	// Rule (b) covers formats like "m:ss" where no hour token precedes the M.
+	isMinuteIndex := make(map[int]bool)
+	{
+		// Collect indices of only DateTimes/ElapsedDateTimes tokens.
+		type dtEntry struct {
+			idx   int    // index into sec.Items
+			upper string // uppercased TValue
+		}
+		var dtTokens []dtEntry
+		for i, tok := range sec.Items {
+			if tok.TType == nfp.TokenTypeDateTimes || tok.TType == nfp.TokenTypeElapsedDateTimes {
+				dtTokens = append(dtTokens, dtEntry{i, strings.ToUpper(tok.TValue)})
+			}
+		}
+		for j, entry := range dtTokens {
+			if entry.upper != "M" && entry.upper != "MM" {
+				continue
+			}
+			// Rule (a): previous dt token was an hour.
+			if j > 0 {
+				prev := dtTokens[j-1].upper
+				if prev == "H" || prev == "HH" {
+					isMinuteIndex[entry.idx] = true
+					continue
+				}
+			}
+			// Rule (b): next dt token is seconds.
+			if j < len(dtTokens)-1 {
+				next := dtTokens[j+1].upper
+				if next == "S" || next == "SS" {
+					isMinuteIndex[entry.idx] = true
+				}
 			}
 		}
 	}
@@ -315,12 +369,17 @@ func renderDateTime(serial float64, sec nfp.Section, date1904 bool) string {
 	lastWasHour := false
 	lastWasSecs := false // true after an SS or S DateTimes token (for milliseconds)
 
-	for _, tok := range sec.Items {
+	for i, tok := range sec.Items {
 		switch tok.TType {
 
 		case nfp.TokenTypeDateTimes:
 			upper := strings.ToUpper(tok.TValue)
-			s := renderDateToken(upper, t, serial, hasAmPm, lastWasHour, date1904)
+			// For M/MM, override lastWasHour with the pre-computed minute flag.
+			lWH := lastWasHour
+			if upper == "M" || upper == "MM" {
+				lWH = isMinuteIndex[i]
+			}
+			s := renderDateToken(upper, t, serial, hasAmPm, lWH, date1904)
 			sb.WriteString(s)
 			// Track whether this token was an hour (H / HH) for M/MM disambiguation.
 			lastWasHour = upper == "H" || upper == "HH"
@@ -526,6 +585,12 @@ func renderDateToken(upper string, t time.Time, serial float64, hasAmPm bool, la
 			return "A"
 		}
 		return "P"
+	case "上午/下午":
+		// Chinese AM/PM: 上午 = morning (AM), 下午 = afternoon (PM).
+		if t.Hour() < 12 {
+			return "上午"
+		}
+		return "下午"
 
 	// ── single-letter month initial ──────────────────────────────────────────
 	// Excel "MMMMM" renders J F M A M J J A S O N D (first letter of month).
@@ -543,18 +608,23 @@ func renderDateToken(upper string, t time.Time, serial float64, hasAmPm bool, la
 
 // renderElapsed renders an elapsed-time token (h, hh, mm, ss — as emitted by
 // the nfp parser with brackets stripped) using the raw serial (fractional days).
+//
+// Elapsed tokens (produced by nfp from [h], [mm], [ss] in the format string)
+// represent total elapsed duration, not a clock component:
+//   - [h] / [hh] → total elapsed hours (no modulo)
+//   - [mm]       → total elapsed minutes (no modulo)
+//   - [ss]       → total elapsed seconds (no modulo)
+//
+// int64 is used throughout to avoid overflow on 32-bit platforms when the
+// serial represents a large elapsed duration (e.g. many thousands of hours).
 func renderElapsed(upper string, serial float64) string {
 	switch upper {
 	case "H", "HH":
-		return strconv.Itoa(int(serial * 24))
+		return strconv.FormatInt(int64(serial*24), 10)
 	case "MM":
-		return fmt.Sprintf("%02d", int(serial*24*60)%60)
-	case "M":
-		return strconv.Itoa(int(serial*24*60) % 60)
+		return strconv.FormatInt(int64(serial*24*60), 10)
 	case "SS":
-		return fmt.Sprintf("%02d", int(serial*24*3600)%60)
-	case "S":
-		return strconv.Itoa(int(serial*24*3600) % 60)
+		return strconv.FormatInt(int64(serial*24*3600), 10)
 	}
 	return ""
 }
@@ -810,8 +880,25 @@ func renderNumber(val float64, sec nfp.Section, sections []nfp.Section) string {
 		if len(sections) < 2 {
 			// Only one section: we must prepend the minus.
 			needsMinus = true
+		} else {
+			// Two+ sections: check whether the negative section (sec) contains
+			// a visual sign indicator — parentheses, minus, or plus literals.
+			// If it does NOT, we must still prepend the minus sign.
+			// (E.g. "0;0" has no wrapper → "-5" not "5".)
+			hasSignWrapper := false
+			for _, tok := range sec.Items {
+				if tok.TType == nfp.TokenTypeLiteral {
+					if tok.TValue == "(" || tok.TValue == ")" ||
+						tok.TValue == "-" || tok.TValue == "+" {
+						hasSignWrapper = true
+						break
+					}
+				}
+			}
+			if !hasSignWrapper {
+				needsMinus = true
+			}
 		}
-		// Two+ sections: negative section handles its own sign display.
 	}
 
 	// ── reassemble by walking tokens ──────────────────────────────────────────
@@ -1125,7 +1212,8 @@ func renderFraction(val float64, sec nfp.Section, sections []nfp.Section) string
 	hasIntPart := false
 	numWidth := 0
 	denWidth := 0
-	phase := 0 // 0=pre-fraction, 1=numerator seen (after Fraction token = denominator)
+	fixedDen := 0 // >0 when a TokenTypeDenominator (literal integer) is present
+	phase := 0    // 0=pre-fraction, 1=numerator seen (after Fraction token = denominator)
 	for _, tok := range sec.Items {
 		switch tok.TType {
 		case nfp.TokenTypeHashPlaceHolder:
@@ -1138,6 +1226,13 @@ func renderFraction(val float64, sec nfp.Section, sections []nfp.Section) string
 			} else {
 				denWidth = len(tok.TValue)
 			}
+		case nfp.TokenTypeDenominator:
+			// Fixed denominator: TValue is a literal integer string (e.g. "4").
+			if v, err := strconv.Atoi(tok.TValue); err == nil && v > 0 {
+				fixedDen = v
+				denWidth = len(tok.TValue)
+			}
+			phase = 1 // denominator tokens only appear after the slash
 		case nfp.TokenTypeFraction:
 			phase = 1
 		}
@@ -1163,7 +1258,14 @@ func renderFraction(val float64, sec nfp.Section, sections []nfp.Section) string
 	}
 
 	// ── rational approximation (Stern–Brocot / mediants) ─────────────────────
-	num, den := bestFraction(frac, maxDen)
+	var num, den int
+	if fixedDen > 0 {
+		// Fixed-denominator format (e.g. "# ?/4"): compute nearest numerator.
+		num = int(math.Round(frac * float64(fixedDen)))
+		den = fixedDen
+	} else {
+		num, den = bestFraction(frac, maxDen)
+	}
 
 	// Carry: if num/den rounds to 1, increment integer part.
 	if den > 0 && num >= den {
@@ -1193,7 +1295,12 @@ func renderFraction(val float64, sec nfp.Section, sections []nfp.Section) string
 	if zeroFrac {
 		// Space-pad to width of numerator, slash, denominator.
 		numStr = strings.Repeat(" ", numWidth)
-		denStr = strings.Repeat(" ", denWidth)
+		if fixedDen > 0 {
+			// Fixed denominator is always shown (e.g. "# ?/4" shows "4" even for integers).
+			denStr = strconv.Itoa(fixedDen)
+		} else {
+			denStr = strings.Repeat(" ", denWidth)
+		}
 	} else {
 		numStr = strconv.FormatInt(int64(num), 10)
 		denStr = strconv.FormatInt(int64(den), 10)
@@ -1225,9 +1332,15 @@ func renderFraction(val float64, sec nfp.Section, sections []nfp.Section) string
 				sb.WriteString(denStr)
 				denEmitted = true
 			}
+		case nfp.TokenTypeDenominator:
+			// Fixed denominator literal — emit denStr (either the fixed number or spaces).
+			if !denEmitted {
+				sb.WriteString(denStr)
+				denEmitted = true
+			}
 		case nfp.TokenTypeFraction:
-			if zeroFrac {
-				sb.WriteByte(' ') // replace '/' with space for alignment
+			if zeroFrac && fixedDen == 0 {
+				sb.WriteByte(' ') // replace '/' with space for alignment (variable-denominator only)
 			} else {
 				sb.WriteByte('/')
 			}
@@ -1316,6 +1429,3 @@ func insertThousandsSep(s string) string {
 	}
 	return b.String()
 }
-
-// isDigit reports whether b is an ASCII digit.
-func isDigit(b byte) bool { return b >= '0' && b <= '9' }

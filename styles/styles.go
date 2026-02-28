@@ -43,10 +43,12 @@ func (st StyleTable) FmtStr(s int) string {
 	return st[s].FormatStr
 }
 
-// BuiltInNumFmt maps built-in numFmtId values (0–49) to their canonical
-// format strings as defined by ECMA-376 §18.8.30.  IDs not present in this
-// map are built-in IDs whose format string is locale-dependent or otherwise
-// not representable as a static string.
+// BuiltInNumFmt maps built-in numFmtId values to their canonical format
+// strings as defined by ECMA-376 §18.8.30.  IDs 27–36 and 50–58 are
+// locale-specific (CJK/Thai) in the spec; the entries here are neutral
+// Western fallbacks used when no custom BrtFmt record overrides the ID in
+// the file.  This ensures the serial is always rendered as a human-readable
+// date rather than a raw number.
 var BuiltInNumFmt = map[int]string{
 	0:  "General",
 	1:  "0",
@@ -62,7 +64,7 @@ var BuiltInNumFmt = map[int]string{
 	11: "0.00E+00",
 	12: "# ?/?",
 	13: "# ??/??",
-	14: "MM-DD-YY",
+	14: "mm-dd-yy",
 	15: "d-mmm-yy",
 	16: "d-mmm",
 	17: "mmm-yy",
@@ -71,6 +73,19 @@ var BuiltInNumFmt = map[int]string{
 	20: "hh:mm",
 	21: "hh:mm:ss",
 	22: "m/d/yy hh:mm",
+	// IDs 27–36: locale-specific CJK date formats.  Real files embed the
+	// locale string via BrtFmt records (which override this table).  These
+	// neutral Western fallbacks are used when no BrtFmt override is present.
+	27: "MM-DD-YYYY",
+	28: "D-MMM-YY",
+	29: "D-MMM-YY",
+	30: "M/D/YY",
+	31: "YYYY-M-D",
+	32: "H:MM",
+	33: "H:MM:SS",
+	34: "H:MM AM/PM",
+	35: "H:MM:SS AM/PM",
+	36: "MM-DD-YYYY",
 	37: `(#,##0_);(#,##0)`,
 	38: `(#,##0_);[Red](#,##0)`,
 	39: `(#,##0.00_);(#,##0.00)`,
@@ -84,6 +99,17 @@ var BuiltInNumFmt = map[int]string{
 	47: "mm:ss.0",
 	48: "##0.0E+0",
 	49: "@",
+	// IDs 50–58: locale-specific CJK date formats (variant set).  Same
+	// fallback strategy as IDs 27–36 above.
+	50: "MM-DD-YYYY",
+	51: "D-MMM-YY",
+	52: "H:MM AM/PM",
+	53: "H:MM:SS AM/PM",
+	54: "D-MMM-YY",
+	55: "H:MM AM/PM",
+	56: "H:MM:SS AM/PM",
+	57: "MM-DD-YYYY",
+	58: "D-MMM-YY",
 }
 
 // ── date-format detection (copy of workbook.isDateFormatID / xlsb.IsDateFormat) ─
@@ -130,7 +156,8 @@ func isDateFormatID(id int, formatStr string) bool {
 		case ch == 'd' || ch == 'D' ||
 			ch == 'm' || ch == 'M' ||
 			ch == 'y' || ch == 'Y' ||
-			ch == 'h' || ch == 'H':
+			ch == 'h' || ch == 'H' ||
+			ch == 's' || ch == 'S':
 			return true
 		}
 	}
