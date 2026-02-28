@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-02-28
+
+### Fixed
+
+- `record.Reader.readLen`: changed LEB-128 accumulator and byte variable from
+  `int` to `uint32`, matching the existing `readID` implementation.  On 32-bit
+  platforms the behaviour was already correct for all valid input, but using a
+  signed architecture-dependent type was inconsistent and silently relied on the
+  `maxRecordLen` guard keeping values in range.
+- `worksheet.parseColRecord`: added a `maxStyleIndex` (`0x7FFFFFFF`) bounds
+  check on the raw `uint32` style index before casting to `int`.  A corrupt
+  value above `math.MaxInt32` previously produced a different `int` result on
+  32-bit vs 64-bit platforms; it now returns a descriptive error on all
+  platforms.
+
 ## [1.0.1] - 2026-02-28
 
 ### Added
@@ -44,7 +59,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `docs/official_microsoft_xlsb_format_documentation.pdf` removed from the
   repository; added to `.gitignore`.
 
-[Unreleased]: https://github.com/TsubasaBE/go-xlsb/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/TsubasaBE/go-xlsb/compare/v1.0.2...HEAD
+[1.0.2]: https://github.com/TsubasaBE/go-xlsb/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/TsubasaBE/go-xlsb/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/TsubasaBE/go-xlsb/compare/v0.2.0...v1.0.0
 [0.2.0]: https://github.com/TsubasaBE/go-xlsb/releases/tag/v0.2.0
