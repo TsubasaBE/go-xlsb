@@ -417,6 +417,12 @@ func parseColRecord(data []byte) (Col, error) {
 	if err != nil {
 		return Col{}, err
 	}
+	// Guard: style is an unvalidated uint32; cap to MaxInt32 so that
+	// int(style) produces the same value on both 32-bit and 64-bit platforms.
+	const maxStyleIndex = 0x7FFFFFFF
+	if style > maxStyleIndex {
+		return Col{}, fmt.Errorf("worksheet: column style index %d exceeds limit", style)
+	}
 	return Col{
 		C1:    int(c1),
 		C2:    int(c2),

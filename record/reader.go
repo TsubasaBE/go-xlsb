@@ -64,18 +64,23 @@ func (r *Reader) readID() (int, error) {
 // readLen reads a variable-length record length (1–4 bytes) encoded as
 // 7-bit little-endian chunks (LEB-128 without sign extension).
 // Returns an error if the 4th byte still has the continuation bit set.
+//
+// Accumulation is done into uint32 (matching readID) to avoid any
+// signed-integer behaviour on 32-bit platforms where int is 32 bits.
+// The returned int is safe because the maxRecordLen guard in Next() ensures
+// the value is always within int range on all platforms.
 func (r *Reader) readLen() (int, error) {
 	buf := [1]byte{}
-	v := 0
+	var v uint32
 	for i := range 4 {
 		_, err := io.ReadFull(r.r, buf[:])
 		if err != nil {
 			return 0, err
 		}
-		b := int(buf[0])
-		v += (b & 0x7F) << (7 * i)
+		b := uint32(buf[0])
+		v += (b & 0x7F) << (7 * uint32(i))
 		if b&0x80 == 0 {
-			return v, nil
+			return int(v), nil
 		}
 		if i == 3 {
 			return 0, fmt.Errorf("record: length continuation bit set on 4th byte (stream corrupt)")
