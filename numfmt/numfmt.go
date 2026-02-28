@@ -502,10 +502,18 @@ func renderDateToken(upper string, t time.Time, serial float64, hasAmPm bool, la
 		return strconv.Itoa(h)
 
 	// ── second ───────────────────────────────────────────────────────────────
+	// IMPORTANT: seconds are computed by flooring the fractional-day part of
+	// the serial, NOT from t.Second().  t uses excelize-compatible half-second
+	// rounding (so minutes/hours are correct), but that rounding would shift
+	// 62.75s → 63s, making the displayed whole-second wrong when sub-second
+	// decimal digits are also rendered.  Flooring the serial gives the correct
+	// whole-second base (62) while the decimal part shows the .75 fraction.
 	case "SS":
-		return fmt.Sprintf("%02d", t.Second())
+		flooredSec := int(math.Floor((serial-math.Trunc(serial))*86400)) % 60
+		return fmt.Sprintf("%02d", flooredSec)
 	case "S":
-		return strconv.Itoa(t.Second())
+		flooredSec := int(math.Floor((serial-math.Trunc(serial))*86400)) % 60
+		return strconv.Itoa(flooredSec)
 
 	// ── AM/PM ────────────────────────────────────────────────────────────────
 	case "AM/PM":
@@ -540,18 +548,39 @@ func renderElapsed(upper string, serial float64) string {
 	return ""
 }
 
+// roundEpsilon is added to the fractional-day part before rounding to seconds.
+// This matches excelize's timeFromExcelTime behaviour which adds 1e-9 to avoid
+// floating-point drift causing floor/truncate to land one second below a whole
+// second boundary (e.g. 0.4999999999 → 0.5000000000 → rounds up correctly).
+const roundEpsilon = 1e-9
+
 // convertSerial converts an Excel serial to time.Time, handling both date
 // systems.  It mirrors xlsb.ConvertDateEx without importing the root package
 // to keep the import graph simple.
 //
-// The fractional-seconds component is floored (not rounded) so that the
-// time.Time always represents the start of the current whole second.  Sub-second
-// rendering in renderDateTime reads the remainder directly from the serial.
+// The fractional-seconds component is rounded (not floored) to match
+// excelize's timeFromExcelTime: excelize adds roundEpsilon to the float part
+// then rounds to the nearest second when nanoseconds > 500 ms.  Using floor
+// causes off-by-one minute errors near minute boundaries.  Sub-second
+// rendering in renderDateTime reads the remainder directly from the serial,
+// not from the time.Time, so this rounding does not affect millisecond output.
 func convertSerial(serial float64, date1904 bool) (time.Time, error) {
 	if math.IsNaN(serial) || math.IsInf(serial, 0) || serial < 0 {
 		return time.Time{}, fmt.Errorf("numfmt: invalid serial %v", serial)
 	}
-	fracSec := int64(math.Floor((serial - math.Trunc(serial)) * 86400))
+	// Add roundEpsilon to the fractional day to avoid floating-point drift
+	// (mirrors excelize's `floatPart := excelTime - float64(wholeDaysPart) + roundEpsilon`).
+	fracDay := (serial - math.Trunc(serial)) + roundEpsilon
+	// Convert fractional day to nanoseconds, then round to the nearest second
+	// (mirrors excelize's half-second rounding logic).
+	const nanosInADay = float64(24 * 60 * 60 * 1e9)
+	durNanos := time.Duration(fracDay * nanosInADay)
+	// Round to nearest second: if nanosecond remainder > 500ms, round up.
+	ns := int(durNanos % time.Second)
+	fracSec := int64(durNanos / time.Second)
+	if ns > 500_000_000 {
+		fracSec++
+	}
 	if fracSec < 0 {
 		fracSec = 0
 	} else if fracSec >= 86400 {

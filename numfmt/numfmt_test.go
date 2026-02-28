@@ -7,7 +7,10 @@ import (
 )
 
 func TestGeneralPrecision(t *testing.T) {
-	vals := []struct{ v float64; want string }{
+	vals := []struct {
+		v    float64
+		want string
+	}{
 		{45498.666666666664, "45498.66667"},
 		{2.09003333333333, "2.090033333"},
 		{6.041666666666667, "6.041666667"},
