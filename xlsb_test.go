@@ -17,6 +17,7 @@ import (
 	"github.com/TsubasaBE/go-xlsb/record"
 	"github.com/TsubasaBE/go-xlsb/stringtable"
 	"github.com/TsubasaBE/go-xlsb/workbook"
+	"github.com/TsubasaBE/go-xlsb/worksheet"
 )
 
 // ── ConvertDate ───────────────────────────────────────────────────────────────
@@ -1114,6 +1115,370 @@ func TestWorkbookDate1904(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ── ErrorCellStrings ──────────────────────────────────────────────────────────
+
+// buildErrCellXLSB constructs a minimal .xlsb in memory with one sheet.
+// The sheet contains two error cells per test case: one BoolErr (0x0003) and
+// one FormulaBoolErr (0x000B), each carrying the given error byte code.
+// The cells are placed at column 0 (BoolErr) and column 1 (FormulaBoolErr) in row 0.
+func buildErrCellXLSB(t *testing.T, errCode byte) []byte {
+	t.Helper()
+
+	writeID := func(buf *bytes.Buffer, id int) {
+		if id < 0x80 {
+			buf.WriteByte(byte(id))
+		} else {
+			buf.WriteByte(byte(id & 0xFF))
+			buf.WriteByte(byte(id >> 8))
+		}
+	}
+	writeLen := func(buf *bytes.Buffer, n int) {
+		for {
+			b := n & 0x7F
+			n >>= 7
+			if n > 0 {
+				buf.WriteByte(byte(b) | 0x80)
+			} else {
+				buf.WriteByte(byte(b))
+				break
+			}
+		}
+	}
+	writeRec := func(buf *bytes.Buffer, id int, payload []byte) {
+		writeID(buf, id)
+		writeLen(buf, len(payload))
+		buf.Write(payload)
+	}
+	encStr := func(s string) []byte {
+		runes := []rune(s)
+		var sb bytes.Buffer
+		_ = binary.Write(&sb, binary.LittleEndian, uint32(len(runes)))
+		for _, r := range runes {
+			_ = binary.Write(&sb, binary.LittleEndian, uint16(r))
+		}
+		return sb.Bytes()
+	}
+	le32 := func(v uint32) []byte {
+		b := make([]byte, 4)
+		binary.LittleEndian.PutUint32(b, v)
+		return b
+	}
+
+	// ── xl/workbook.bin ───────────────────────────────────────────────────────
+
+	var wb bytes.Buffer
+	writeRec(&wb, 0x0183, nil) // WORKBOOK start
+	writeRec(&wb, 0x018F, nil) // SHEETS start
+
+	var sheetRec bytes.Buffer
+	sheetRec.Write(le32(0))            // state flags (visible)
+	sheetRec.Write(le32(1))            // sheetId
+	sheetRec.Write(encStr("rId1"))     // relId
+	sheetRec.Write(encStr("ErrSheet")) // name
+	writeRec(&wb, 0x019C, sheetRec.Bytes())
+
+	writeRec(&wb, 0x0190, nil) // SHEETS end
+	writeRec(&wb, 0x0184, nil) // WORKBOOK end
+
+	// ── xl/worksheets/sheet1.bin ──────────────────────────────────────────────
+
+	var ws bytes.Buffer
+	writeRec(&ws, 0x0181, nil) // WORKSHEET start
+
+	// DIMENSION: r1=0, r2=0, c1=0, c2=1
+	var dimPay bytes.Buffer
+	dimPay.Write(le32(0))
+	dimPay.Write(le32(0))
+	dimPay.Write(le32(0))
+	dimPay.Write(le32(1))
+	writeRec(&ws, 0x0194, dimPay.Bytes())
+
+	writeRec(&ws, 0x0191, nil) // SHEETDATA start
+
+	// ROW r=0
+	writeRec(&ws, 0x0000, le32(0))
+
+	// BoolErr cell at col 0: col(4) + style(4) + errCode(1)
+	var boolErrPay bytes.Buffer
+	boolErrPay.Write(le32(0)) // col 0
+	boolErrPay.Write(le32(0)) // style 0
+	boolErrPay.WriteByte(errCode)
+	writeRec(&ws, 0x0003, boolErrPay.Bytes()) // BoolErr = 0x0003
+
+	// FormulaBoolErr cell at col 1: col(4) + style(4) + errCode(1)
+	var formulaErrPay bytes.Buffer
+	formulaErrPay.Write(le32(1)) // col 1
+	formulaErrPay.Write(le32(0)) // style 0
+	formulaErrPay.WriteByte(errCode)
+	writeRec(&ws, 0x000B, formulaErrPay.Bytes()) // FormulaBoolErr = 0x000B
+
+	writeRec(&ws, 0x0192, nil) // SHEETDATA end
+	writeRec(&ws, 0x0182, nil) // WORKSHEET end
+
+	// ── assemble ZIP ─────────────────────────────────────────────────────────
+
+	var zipBuf bytes.Buffer
+	zw := zip.NewWriter(&zipBuf)
+
+	addFile := func(name string, data []byte) {
+		t.Helper()
+		f, err := zw.Create(name)
+		if err != nil {
+			t.Fatalf("zip create %s: %v", name, err)
+		}
+		if _, err := f.Write(data); err != nil {
+			t.Fatalf("zip write %s: %v", name, err)
+		}
+	}
+
+	relsXML := `<?xml version="1.0" encoding="UTF-8"?>` +
+		`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+		`<Relationship Id="rId1" Type="worksheet" Target="worksheets/sheet1.bin"/>` +
+		`</Relationships>`
+	addFile("xl/_rels/workbook.bin.rels", []byte(relsXML))
+	addFile("xl/workbook.bin", wb.Bytes())
+	addFile("xl/worksheets/sheet1.bin", ws.Bytes())
+
+	if err := zw.Close(); err != nil {
+		t.Fatalf("zip close: %v", err)
+	}
+	return zipBuf.Bytes()
+}
+
+func TestErrorCellStrings(t *testing.T) {
+	tests := []struct {
+		name    string
+		errCode byte
+		want    string
+	}{
+		{"null", 0x00, "#NULL!"},
+		{"div0", 0x07, "#DIV/0!"},
+		{"value", 0x0F, "#VALUE!"},
+		{"ref", 0x17, "#REF!"},
+		{"name", 0x1D, "#NAME?"},
+		{"num", 0x24, "#NUM!"},
+		{"na", 0x2A, "#N/A"},
+		{"getting_data", 0x2B, "#GETTING_DATA"},
+		{"unknown_fallback", 0xFF, "0xff"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			data := buildErrCellXLSB(t, tc.errCode)
+			wb, err := workbook.OpenReader(bytes.NewReader(data), int64(len(data)))
+			if err != nil {
+				t.Fatalf("OpenReader: %v", err)
+			}
+			defer wb.Close()
+
+			ws, err := wb.Sheet(1)
+			if err != nil {
+				t.Fatalf("Sheet(1): %v", err)
+			}
+
+			var row []worksheet.Cell
+			for r := range ws.Rows(true) {
+				row = r
+				break
+			}
+			if row == nil {
+				t.Fatal("no rows returned")
+			}
+
+			// col 0: BoolErr
+			if got, ok := row[0].V.(string); !ok {
+				t.Errorf("BoolErr V type = %T, want string", row[0].V)
+			} else if got != tc.want {
+				t.Errorf("BoolErr V = %q, want %q", got, tc.want)
+			}
+
+			// col 1: FormulaBoolErr
+			if got, ok := row[1].V.(string); !ok {
+				t.Errorf("FormulaBoolErr V type = %T, want string", row[1].V)
+			} else if got != tc.want {
+				t.Errorf("FormulaBoolErr V = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// ── SheetVisibility ───────────────────────────────────────────────────────────
+
+// buildVisibilityXLSB constructs a minimal .xlsb with three sheets whose
+// hsState flags are 0 (visible), 1 (hidden), and 2 (veryHidden) respectively.
+func buildVisibilityXLSB(t *testing.T) []byte {
+	t.Helper()
+
+	writeID := func(buf *bytes.Buffer, id int) {
+		if id < 0x80 {
+			buf.WriteByte(byte(id))
+		} else {
+			buf.WriteByte(byte(id & 0xFF))
+			buf.WriteByte(byte(id >> 8))
+		}
+	}
+	writeLen := func(buf *bytes.Buffer, n int) {
+		for {
+			b := n & 0x7F
+			n >>= 7
+			if n > 0 {
+				buf.WriteByte(byte(b) | 0x80)
+			} else {
+				buf.WriteByte(byte(b))
+				break
+			}
+		}
+	}
+	writeRec := func(buf *bytes.Buffer, id int, payload []byte) {
+		writeID(buf, id)
+		writeLen(buf, len(payload))
+		buf.Write(payload)
+	}
+	encStr := func(s string) []byte {
+		runes := []rune(s)
+		var sb bytes.Buffer
+		_ = binary.Write(&sb, binary.LittleEndian, uint32(len(runes)))
+		for _, r := range runes {
+			_ = binary.Write(&sb, binary.LittleEndian, uint16(r))
+		}
+		return sb.Bytes()
+	}
+	le32 := func(v uint32) []byte {
+		b := make([]byte, 4)
+		binary.LittleEndian.PutUint32(b, v)
+		return b
+	}
+
+	// ── xl/workbook.bin ───────────────────────────────────────────────────────
+
+	type sheetDef struct {
+		name    string
+		relID   string
+		sheetID uint32
+		hsState uint32 // low 2 bits only
+	}
+	sheets := []sheetDef{
+		{"Sheet1", "rId1", 1, 0}, // visible
+		{"Sheet2", "rId2", 2, 1}, // hidden
+		{"Sheet3", "rId3", 3, 2}, // veryHidden
+	}
+
+	var wb bytes.Buffer
+	writeRec(&wb, 0x0183, nil) // WORKBOOK start
+	writeRec(&wb, 0x018F, nil) // SHEETS start
+
+	for _, s := range sheets {
+		var sheetRec bytes.Buffer
+		sheetRec.Write(le32(s.hsState)) // flags: low 2 bits = hsState
+		sheetRec.Write(le32(s.sheetID)) // sheetId
+		sheetRec.Write(encStr(s.relID)) // relId
+		sheetRec.Write(encStr(s.name))  // name
+		writeRec(&wb, 0x019C, sheetRec.Bytes())
+	}
+
+	writeRec(&wb, 0x0190, nil) // SHEETS end
+	writeRec(&wb, 0x0184, nil) // WORKBOOK end
+
+	// ── minimal worksheet binary (reused for all three sheets) ────────────────
+
+	var ws bytes.Buffer
+	writeRec(&ws, 0x0181, nil) // WORKSHEET start
+	writeRec(&ws, 0x0191, nil) // SHEETDATA start
+	writeRec(&ws, 0x0192, nil) // SHEETDATA end
+	writeRec(&ws, 0x0182, nil) // WORKSHEET end
+	wsBytes := ws.Bytes()
+
+	// ── assemble ZIP ─────────────────────────────────────────────────────────
+
+	var zipBuf bytes.Buffer
+	zw := zip.NewWriter(&zipBuf)
+
+	addFile := func(name string, data []byte) {
+		t.Helper()
+		f, err := zw.Create(name)
+		if err != nil {
+			t.Fatalf("zip create %s: %v", name, err)
+		}
+		if _, err := f.Write(data); err != nil {
+			t.Fatalf("zip write %s: %v", name, err)
+		}
+	}
+
+	relsXML := `<?xml version="1.0" encoding="UTF-8"?>` +
+		`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+		`<Relationship Id="rId1" Type="worksheet" Target="worksheets/sheet1.bin"/>` +
+		`<Relationship Id="rId2" Type="worksheet" Target="worksheets/sheet2.bin"/>` +
+		`<Relationship Id="rId3" Type="worksheet" Target="worksheets/sheet3.bin"/>` +
+		`</Relationships>`
+	addFile("xl/_rels/workbook.bin.rels", []byte(relsXML))
+	addFile("xl/workbook.bin", wb.Bytes())
+	addFile("xl/worksheets/sheet1.bin", wsBytes)
+	addFile("xl/worksheets/sheet2.bin", wsBytes)
+	addFile("xl/worksheets/sheet3.bin", wsBytes)
+
+	if err := zw.Close(); err != nil {
+		t.Fatalf("zip close: %v", err)
+	}
+	return zipBuf.Bytes()
+}
+
+func TestSheetVisibility(t *testing.T) {
+	data := buildVisibilityXLSB(t)
+	wb, err := workbook.OpenReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatalf("OpenReader: %v", err)
+	}
+	defer wb.Close()
+
+	t.Run("SheetVisible known sheets", func(t *testing.T) {
+		tests := []struct {
+			name string
+			want bool
+		}{
+			{"Sheet1", true},
+			{"Sheet2", false},
+			{"Sheet3", false},
+		}
+		for _, tc := range tests {
+			if got := wb.SheetVisible(tc.name); got != tc.want {
+				t.Errorf("SheetVisible(%q) = %v, want %v", tc.name, got, tc.want)
+			}
+		}
+	})
+
+	t.Run("SheetVisible unknown name returns false", func(t *testing.T) {
+		if wb.SheetVisible("nonexistent") {
+			t.Error("SheetVisible(\"nonexistent\") = true, want false")
+		}
+	})
+
+	t.Run("SheetVisible case-insensitive", func(t *testing.T) {
+		if !wb.SheetVisible("sheet1") {
+			t.Error("SheetVisible(\"sheet1\") = false, want true")
+		}
+		if wb.SheetVisible("SHEET2") {
+			t.Error("SheetVisible(\"SHEET2\") = true, want false")
+		}
+	})
+
+	t.Run("SheetVisibility raw levels", func(t *testing.T) {
+		tests := []struct {
+			name string
+			want int
+		}{
+			{"Sheet1", workbook.SheetVisible},
+			{"Sheet2", workbook.SheetHidden},
+			{"Sheet3", workbook.SheetVeryHidden},
+			{"nonexistent", -1},
+		}
+		for _, tc := range tests {
+			if got := wb.SheetVisibility(tc.name); got != tc.want {
+				t.Errorf("SheetVisibility(%q) = %d, want %d", tc.name, got, tc.want)
+			}
+		}
+	})
 }
 
 // ── ConvertDateEx ─────────────────────────────────────────────────────────────

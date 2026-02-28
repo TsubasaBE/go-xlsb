@@ -16,11 +16,25 @@ import (
 	"github.com/TsubasaBE/go-xlsb/worksheet"
 )
 
+// Sheet visibility levels, as stored in the hsState field of a BrtBundleSh
+// record (MS-XLSB §2.4.720). Use these constants with SheetVisibility.
+const (
+	// SheetVisible indicates the sheet tab is visible (hsState == 0).
+	SheetVisible = 0
+	// SheetHidden indicates the sheet is hidden but can be unhidden by the
+	// user via Excel's "Unhide" dialog (hsState == 1).
+	SheetHidden = 1
+	// SheetVeryHidden indicates the sheet is hidden and cannot be unhidden
+	// through the Excel UI — only via VBA or programmatic access (hsState == 2).
+	SheetVeryHidden = 2
+)
+
 // sheetEntry holds the display name and the zip-internal path target for one
 // worksheet.
 type sheetEntry struct {
-	name   string
-	target string // e.g. "worksheets/sheet1.bin"
+	name       string
+	target     string // e.g. "worksheets/sheet1.bin"
+	visibility int    // SheetVisible, SheetHidden, or SheetVeryHidden
 }
 
 // Workbook represents an open .xlsb workbook.
@@ -96,6 +110,26 @@ func (wb *Workbook) SheetByName(name string) (*worksheet.Worksheet, error) {
 		}
 	}
 	return nil, fmt.Errorf("workbook: sheet %q not found", name)
+}
+
+// SheetVisible reports whether the named sheet is visible (case-insensitive).
+// It returns false for hidden sheets, very-hidden sheets, and unknown names.
+// To distinguish hidden from very-hidden, use SheetVisibility.
+func (wb *Workbook) SheetVisible(name string) bool {
+	return wb.SheetVisibility(name) == SheetVisible
+}
+
+// SheetVisibility returns the visibility level of the named sheet
+// (case-insensitive): SheetVisible (0), SheetHidden (1), or SheetVeryHidden (2).
+// It returns -1 if no sheet with that name exists.
+func (wb *Workbook) SheetVisibility(name string) int {
+	lower := strings.ToLower(name)
+	for _, s := range wb.sheets {
+		if strings.ToLower(s.name) == lower {
+			return s.visibility
+		}
+	}
+	return -1
 }
 
 // Close releases the underlying ZIP file handle.
@@ -407,18 +441,21 @@ func parseRelsXML(data []byte) (map[string]string, error) {
 
 // parseSheetRecord decodes a SHEET record payload.
 //
-// Python layout:
+// BrtBundleSh layout (MS-XLSB §2.4.720):
 //
-//	reader.skip(4)           # 4 unknown bytes
-//	sheetid = reader.read_int()
-//	relid   = reader.read_string()
-//	name    = reader.read_string()
+//	hsState = read_uint32() & 0x03   # low 2 bits: 0=visible, 1=hidden, 2=veryHidden
+//	sheetId = read_uint32()
+//	relId   = read_string()
+//	name    = read_string()
 func parseSheetRecord(data []byte, rels map[string]string) (sheetEntry, error) {
 	rr := record.NewRecordReader(data)
 
-	if err := rr.Skip(4); err != nil {
-		return sheetEntry{}, fmt.Errorf("skip state flags: %w", err)
+	flags, err := rr.ReadUint32()
+	if err != nil {
+		return sheetEntry{}, fmt.Errorf("read state flags: %w", err)
 	}
+	visibility := int(flags & 0x03)
+
 	if _, err := rr.ReadUint32(); err != nil { // sheetId — not used by us
 		return sheetEntry{}, fmt.Errorf("read sheetId: %w", err)
 	}
@@ -435,5 +472,5 @@ func parseSheetRecord(data []byte, rels map[string]string) (sheetEntry, error) {
 	if !ok {
 		return sheetEntry{}, fmt.Errorf("no relationship found for rId %q", relID)
 	}
-	return sheetEntry{name: name, target: target}, nil
+	return sheetEntry{name: name, target: target, visibility: visibility}, nil
 }

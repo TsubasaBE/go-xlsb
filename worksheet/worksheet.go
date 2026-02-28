@@ -65,7 +65,7 @@ type Cell struct {
 	C int
 	// V holds the typed cell value. The dynamic type is one of:
 	//   - nil          — blank / empty cell
-	//   - string       — text, formula-string result, or error formatted as hex (e.g. "0x2a")
+	//   - string       — text, formula-string result, or Excel error string (e.g. "#DIV/0!")
 	//   - float64      — numeric value, date serial, or formula-float result
 	//   - bool         — boolean value
 	V any
@@ -474,6 +474,28 @@ func parseRowRecord(data []byte) (int, error) {
 	return int(r), nil
 }
 
+// errStrings maps BIFF12 BErr byte codes (MS-XLSB §2.5.97.2) to the
+// corresponding Excel error string displayed in a cell.
+var errStrings = map[byte]string{
+	0x00: "#NULL!",
+	0x07: "#DIV/0!",
+	0x0F: "#VALUE!",
+	0x17: "#REF!",
+	0x1D: "#NAME?",
+	0x24: "#NUM!",
+	0x2A: "#N/A",
+	0x2B: "#GETTING_DATA",
+}
+
+// errString returns the Excel error string for the given BErr byte code, or a
+// hex fallback (e.g. "0xff") for unknown codes.
+func errString(b byte) string {
+	if s, ok := errStrings[b]; ok {
+		return s
+	}
+	return fmt.Sprintf("0x%02x", b)
+}
+
 // internalCell is used only during parsing.
 type internalCell struct {
 	C     int
@@ -519,7 +541,7 @@ func parseCellRecord(data []byte, recID int, st *stringtable.StringTable) (inter
 		if err != nil {
 			break
 		}
-		v = fmt.Sprintf("0x%02x", b)
+		v = errString(b)
 	case biff12.Bool:
 		b, err := rr.ReadUint8()
 		if err != nil {
@@ -568,7 +590,7 @@ func parseCellRecord(data []byte, recID int, st *stringtable.StringTable) (inter
 		if err != nil {
 			break
 		}
-		v = fmt.Sprintf("0x%02x", b)
+		v = errString(b)
 		// biff12.Blank: v remains nil
 	}
 
