@@ -122,6 +122,10 @@ const (
 	Text           = 0x04FD
 
 	// ── Table records ─────────────────────────────────────────────────────────
+	MergeCells    = 0x01B1
+	MergeCellsEnd = 0x01B2
+	MergeCell     = 0x01B0
+
 	AutoFilter      = 0x01A1
 	AutoFilterEnd   = 0x01A2
 	FilterColumn    = 0x01A3

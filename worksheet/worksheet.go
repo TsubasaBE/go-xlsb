@@ -33,6 +33,14 @@ type Col struct {
 	Style int
 }
 
+// MergeArea describes a merged cell range.
+// R and C are the 0-based row and column of the top-left anchor cell.
+// H is the height (number of rows) and W is the width (number of columns)
+// spanned by the merge.
+type MergeArea struct {
+	R, C, H, W int
+}
+
 // Cell is a single worksheet cell.
 // V holds the typed value:
 //   - nil          — blank / empty
@@ -52,6 +60,7 @@ type Worksheet struct {
 	Dimension  *Dimension
 	Cols       []Col
 	Hyperlinks map[[2]int]string // [row,col] → relationship ID
+	MergeCells []MergeArea       // all merged ranges in this sheet
 
 	data         []byte                   // full binary payload
 	dataOffset   int64                    // byte offset of SHEETDATA record payload
@@ -226,9 +235,23 @@ func (ws *Worksheet) parse() error {
 			ws.dataOffset = off
 			ws.hasSheetData = true
 
-			// If we have no .rels to process we can stop pre-scanning here.
-			if ws.rels == nil {
-				return nil
+			// Skip over the row/cell records inside SheetData so we can
+			// continue pre-scanning for MergeCell, Hyperlink, etc. which
+			// appear after SheetDataEnd in the stream.
+			for {
+				id, _, err := rdr.Next()
+				if err != nil {
+					return nil // truncated stream — treat as end
+				}
+				if id == biff12.SheetDataEnd {
+					break
+				}
+			}
+
+		case biff12.MergeCell:
+			ma, err := parseMergeCellRecord(recData)
+			if err == nil {
+				ws.MergeCells = append(ws.MergeCells, ma)
 			}
 
 		case biff12.Hyperlink:
@@ -443,6 +466,46 @@ func parseCellRecord(data []byte, recID int, st *stringtable.StringTable) (inter
 	}
 
 	return internalCell{C: int(col), V: v}, nil
+}
+
+// parseMergeCellRecord decodes a MERGE_CELL record.
+//
+// Layout is identical to DIMENSION:
+//
+//	r1 = read_uint32()  // first row (0-based)
+//	r2 = read_uint32()  // last  row (0-based, inclusive)
+//	c1 = read_uint32()  // first col (0-based)
+//	c2 = read_uint32()  // last  col (0-based, inclusive)
+func parseMergeCellRecord(data []byte) (MergeArea, error) {
+	rr := record.NewRecordReader(data)
+	r1, err := rr.ReadUint32()
+	if err != nil {
+		return MergeArea{}, err
+	}
+	r2, err := rr.ReadUint32()
+	if err != nil {
+		return MergeArea{}, err
+	}
+	c1, err := rr.ReadUint32()
+	if err != nil {
+		return MergeArea{}, err
+	}
+	c2, err := rr.ReadUint32()
+	if err != nil {
+		return MergeArea{}, err
+	}
+	if r2 < r1 {
+		return MergeArea{}, fmt.Errorf("mergecell: r2 (%d) < r1 (%d)", r2, r1)
+	}
+	if c2 < c1 {
+		return MergeArea{}, fmt.Errorf("mergecell: c2 (%d) < c1 (%d)", c2, c1)
+	}
+	return MergeArea{
+		R: int(r1),
+		C: int(c1),
+		H: int(r2-r1) + 1,
+		W: int(c2-c1) + 1,
+	}, nil
 }
 
 // hyperlinkRecord is a temporary struct for HYPERLINK record parsing.
