@@ -224,6 +224,13 @@ becomes a third block between stdlib and internal.
 
 ---
 
+## README Conventions
+
+- No emojis anywhere in `README.md`.
+- New sections should match the register and style of the existing content.
+
+---
+
 ## Architecture Notes
 
 - **Two-pass worksheet parsing:** `worksheet.New()` pre-scans the stream for metadata
