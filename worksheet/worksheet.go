@@ -26,10 +26,19 @@ type Dimension struct {
 }
 
 // Col describes a column definition record.
+// C1 and C2 are the 0-based first and last column indices of the range this
+// definition applies to (inclusive). Width is the column width in character
+// units (equivalent to the "characters" unit displayed in Excel's column-width
+// dialog). Style is the 0-based index into the workbook's cell-format (XF)
+// table that applies to blank cells in the range.
 type Col struct {
-	C1    int
-	C2    int
+	// C1 is the 0-based index of the first column in the range.
+	C1 int
+	// C2 is the 0-based index of the last column in the range (inclusive).
+	C2 int
+	// Width is the column width in character units.
 	Width float64
+	// Style is the 0-based cell-format (XF) index applied to blank cells.
 	Style int
 }
 
@@ -38,29 +47,46 @@ type Col struct {
 // H is the height (number of rows) and W is the width (number of columns)
 // spanned by the merge.
 type MergeArea struct {
-	R, C, H, W int
+	// R is the 0-based row index of the top-left anchor cell.
+	R int
+	// C is the 0-based column index of the top-left anchor cell.
+	C int
+	// H is the number of rows spanned by the merge (always >= 1).
+	H int
+	// W is the number of columns spanned by the merge (always >= 1).
+	W int
 }
 
 // Cell is a single worksheet cell.
-// V holds the typed value:
-//   - nil          — blank / empty
-//   - string       — text or formula-string result
-//   - float64      — numeric, date-serial, formula-float result
-//   - bool         — boolean
-//   - string       — error value formatted as hex (e.g. "0x2a")
 type Cell struct {
+	// R is the 0-based row index of the cell.
 	R int
+	// C is the 0-based column index of the cell.
 	C int
+	// V holds the typed cell value. The dynamic type is one of:
+	//   - nil          — blank / empty cell
+	//   - string       — text, formula-string result, or error formatted as hex (e.g. "0x2a")
+	//   - float64      — numeric value, date serial, or formula-float result
+	//   - bool         — boolean value
 	V any
 }
 
 // Worksheet holds parsed metadata and provides row iteration for one sheet.
 type Worksheet struct {
-	Name       string
-	Dimension  *Dimension
-	Cols       []Col
-	Hyperlinks map[[2]int]string // [row,col] → relationship ID
-	MergeCells []MergeArea       // all merged ranges in this sheet
+	// Name is the display name of the worksheet as it appears on the sheet tab.
+	Name string
+	// Dimension describes the used range of the worksheet. It is nil if no
+	// DIMENSION record was found in the binary stream.
+	Dimension *Dimension
+	// Cols contains the column-definition entries parsed from COL records.
+	// The slice may be empty if the sheet defines no explicit column widths.
+	Cols []Col
+	// Hyperlinks maps each hyperlink cell coordinate [row, col] (both 0-based)
+	// to its relationship ID, which can be resolved via the workbook's .rels
+	// file to obtain the target URL.
+	Hyperlinks map[[2]int]string
+	// MergeCells contains all merged-cell ranges defined in the sheet.
+	MergeCells []MergeArea
 
 	data         []byte                   // full binary payload
 	dataOffset   int64                    // byte offset of SHEETDATA record payload

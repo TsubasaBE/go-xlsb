@@ -31,6 +31,8 @@ type Workbook struct {
 }
 
 // Open opens the named .xlsb file and parses its workbook metadata.
+// The caller must call Close on the returned Workbook when done to release the
+// underlying file handle.
 func Open(name string) (*Workbook, error) {
 	rc, err := zip.OpenReader(name)
 	if err != nil {
@@ -68,6 +70,8 @@ func (wb *Workbook) Sheets() []string {
 }
 
 // Sheet returns the worksheet at the given 1-based index.
+// Index 1 refers to the first sheet. An out-of-range index returns a non-nil
+// error describing the valid range.
 func (wb *Workbook) Sheet(idx int) (*worksheet.Worksheet, error) {
 	if idx < 1 || idx > len(wb.sheets) {
 		return nil, fmt.Errorf("workbook: sheet index %d out of range [1, %d]", idx, len(wb.sheets))
@@ -76,6 +80,7 @@ func (wb *Workbook) Sheet(idx int) (*worksheet.Worksheet, error) {
 }
 
 // SheetByName returns the worksheet with the given name (case-insensitive).
+// It returns a non-nil error if no sheet with that name exists.
 func (wb *Workbook) SheetByName(name string) (*worksheet.Worksheet, error) {
 	lower := strings.ToLower(name)
 	for _, s := range wb.sheets {
@@ -87,6 +92,8 @@ func (wb *Workbook) SheetByName(name string) (*worksheet.Worksheet, error) {
 }
 
 // Close releases the underlying ZIP file handle.
+// It is a no-op when the workbook was opened via OpenReader (no file handle to
+// release), and always returns nil in that case.
 func (wb *Workbook) Close() error {
 	if wb.zr != nil {
 		return wb.zr.Close()
