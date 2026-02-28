@@ -4,6 +4,14 @@ A Go port of [pyxlsb](https://github.com/willtrnr/pyxlsb) by [William Turner](ht
 
 Reads Microsoft Excel Binary Workbook (`.xlsb`) files. Pure Go, no CGO.
 
+## Credits
+
+This library is a port of [pyxlsb](https://github.com/willtrnr/pyxlsb), written by [William Turner](https://github.com/willtrnr). The BIFF12 parsing logic, shared string table handling, date conversion, and overall design are all derived from his work.
+
+Number format rendering draws heavily on the design and research of the [Excelize](https://github.com/qax-os/excelize) project and team. Their open-source work on Excel format strings, built-in number format tables, date/time token parsing, and display rendering provided essential reference material for the `FormatCell` implementation in this library.
+
+The number format token parser also references the [github.com/xuri/nfp](https://github.com/xuri/nfp) package and its authors. `nfp` (Number Format Parser) underpins Excelize's format handling and its tokenization approach influenced the design of the format parser used here.
+
 ## Installation
 
 ```sh
@@ -220,14 +228,6 @@ for row := range sheet.Rows(false) {
 `ConvertDate` is a convenience wrapper for the common 1900 date system (`wb.Date1904 == false`). `ConvertDateEx` additionally handles the 1904 date system used by some workbooks (notably those originally created on macOS).
 
 Both functions handle the Lotus 1-2-3 leap-year bug that Excel carries forward in the 1900 system: serial 60 is a phantom date (1900-02-29 never existed) but Excel counts it anyway, so serial 61 onwards is off by one without compensation. The library compensates automatically.
-
-## Credits
-
-This library is a port of [pyxlsb](https://github.com/willtrnr/pyxlsb), written by [William Turner](https://github.com/willtrnr). The BIFF12 parsing logic, shared string table handling, date conversion, and overall design are all derived from his work.
-
-Number format rendering draws heavily on the design and research of the [Excelize](https://github.com/qax-os/excelize) project and team. Their open-source work on Excel format strings, built-in number format tables, date/time token parsing, and display rendering provided essential reference material for the `FormatCell` implementation in this library.
-
-The number format token parser also references the [github.com/xuri/nfp](https://github.com/xuri/nfp) package and its authors. `nfp` (Number Format Parser) underpins Excelize's format handling and its tokenization approach influenced the design of the format parser used here.
 
 ## License
 
