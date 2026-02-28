@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-02-28
+
+### Added
+
+- Updated godoc comments
+
 ## [1.0.0] - 2026-02-28
 
 ### Added
@@ -38,6 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `docs/official_microsoft_xlsb_format_documentation.pdf` removed from the
   repository; added to `.gitignore`.
 
-[Unreleased]: https://github.com/TsubasaBE/go-xlsb/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/TsubasaBE/go-xlsb/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/TsubasaBE/go-xlsb/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/TsubasaBE/go-xlsb/compare/v0.2.0...v1.0.0
 [0.2.0]: https://github.com/TsubasaBE/go-xlsb/releases/tag/v0.2.0
