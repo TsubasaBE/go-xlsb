@@ -1023,14 +1023,12 @@ func TestCopyConsistencyPlanningMSE3(t *testing.T) {
 // TestPlanningMSE12CPGMergeCells verifies that merged cell ranges are parsed
 // from the CPG sheet of planning_MSE12.xlsb.
 //
-// Row 15 of CPG (0-based row 14) lies inside a vertical merge spanning rows
-// 13–15 (0-based 12–14) in column C=2; those cells carry an empty-string
-// value.  The header area around row 16 contains a horizontal merge starting
-// at C=0 with value "CPG".  We verify:
+// We verify:
 //  1. MergeCells is non-empty (merge records were parsed).
-//  2. At least one merge covers row 14 (0-based), confirming row 15 is merged.
-//  3. The anchor cell of every merge (top-left corner) carries the actual value;
-//     all non-anchor cells in the same merge are blank (nil or empty string).
+//  2. At least one merge covers 0-based row 15 (Excel row 16).
+//  3. Non-anchor rows in every vertical merge carry the propagated anchor value —
+//     Rows() fills non-anchor cells with the anchor cell's value so callers see
+//     the same value on every row of the merged region.
 func TestPlanningMSE12CPGMergeCells(t *testing.T) {
 	wb := openXLSB(t, "planning_MSE12.xlsb")
 	sheet, err := wb.SheetByName("CPG")
@@ -1044,24 +1042,23 @@ func TestPlanningMSE12CPGMergeCells(t *testing.T) {
 	}
 	t.Logf("CPG has %d merge areas", len(sheet.MergeCells))
 
-	// 2. At least one merge area must cover 0-based row 15 (Excel row 16),
-	// which is the header row that Excel displays as part of the merged area
-	// the user identified as "row 15" (the merge anchor is at 0-based row 15).
+	// 2. At least one merge area must cover 0-based row 15 (Excel row 16).
 	const targetRow = 15 // 0-based; Excel row 16
 	found := false
 	for _, ma := range sheet.MergeCells {
 		if ma.R <= targetRow && targetRow < ma.R+ma.H {
 			found = true
-			t.Logf("  merge covering row 14: R=%d C=%d H=%d W=%d", ma.R, ma.C, ma.H, ma.W)
+			t.Logf("  merge covering row %d: R=%d C=%d H=%d W=%d", targetRow, ma.R, ma.C, ma.H, ma.W)
 		}
 	}
 	if !found {
-		t.Errorf("no merge area covers 0-based row %d (sheet row 15)", targetRow)
+		t.Errorf("no merge area covers 0-based row %d (Excel row %d)", targetRow, targetRow+1)
 	}
 
-	// 3. For every merge area, collect rows and verify the anchor has a value
-	// while non-anchor cells in the same column are blank.
-	// Only check merges that are entirely within the first 20 rows (for speed).
+	// 3. For every vertical merge (H > 1) within the first 20 rows, verify
+	// that non-anchor rows carry the same value as the anchor cell —
+	// Rows() propagates the anchor value into non-anchor rows.
+	// Only check merges that start within the first 20 rows (for speed).
 	rows := make(map[int][]worksheet.Cell)
 	rowNum := 0
 	for row := range sheet.Rows(true) {
@@ -1073,8 +1070,8 @@ func TestPlanningMSE12CPGMergeCells(t *testing.T) {
 	}
 
 	for _, ma := range sheet.MergeCells {
-		if ma.R >= 20 {
-			continue
+		if ma.R >= 20 || ma.H <= 1 {
+			continue // only vertical merges need row propagation
 		}
 		anchorRow, ok := rows[ma.R]
 		if !ok {
@@ -1083,20 +1080,19 @@ func TestPlanningMSE12CPGMergeCells(t *testing.T) {
 		if ma.C >= len(anchorRow) {
 			continue
 		}
-		// Non-anchor rows in the merge must have a blank (nil) value at the
-		// same column — BIFF12 only stores the value in the anchor cell.
+		anchorVal := anchorRow[ma.C].V
 		for dr := 1; dr < ma.H && ma.R+dr < 20; dr++ {
 			nonAnchorRow, ok := rows[ma.R+dr]
 			if !ok {
-				continue // sparse: row not present at all — fine
+				continue // sparse: row absent — fine
 			}
 			if ma.C >= len(nonAnchorRow) {
 				continue
 			}
-			v := nonAnchorRow[ma.C].V
-			if s, ok := v.(string); ok && s != "" {
-				t.Errorf("non-anchor cell at row=%d col=%d inside merge (R=%d C=%d H=%d W=%d) has non-empty value %q",
-					ma.R+dr, ma.C, ma.R, ma.C, ma.H, ma.W, s)
+			got := nonAnchorRow[ma.C].V
+			if got != anchorVal {
+				t.Errorf("non-anchor cell row=%d col=%d in merge (R=%d C=%d H=%d W=%d): got %v, want propagated anchor value %v",
+					ma.R+dr, ma.C, ma.R, ma.C, ma.H, ma.W, got, anchorVal)
 			}
 		}
 	}
@@ -1153,6 +1149,60 @@ func TestPlanningMSE12CPGRow16MergedValue(t *testing.T) {
 			break
 		}
 		rowNum++
+	}
+}
+
+// TestPlanningMSE12CPGGradeRows verifies that the vertical merge spanning
+// Excel rows 17–19 (0-based rows 16–18) in column A of the CPG sheet causes
+// all three rows to carry the value "Grade" after merge propagation.
+//
+// In BIFF12, only the anchor cell (row 16, col 0) stores the value; the two
+// non-anchor rows below it are blank in the binary.  Rows() must propagate the
+// anchor value so callers see "Grade" on every row of the merged region.
+func TestPlanningMSE12CPGGradeRows(t *testing.T) {
+	wb := openXLSB(t, "planning_MSE12.xlsb")
+	sheet, err := wb.SheetByName("CPG")
+	if err != nil {
+		t.Fatalf("SheetByName: %v", err)
+	}
+
+	// The merge R=16 C=0 H=3 W=1 spans Excel rows 17-19 (0-based 16-18).
+	const (
+		anchorRow = 16 // 0-based; Excel row 17
+		lastRow   = 18 // 0-based; Excel row 19
+	)
+
+	// Collect rows 16-18 (0-based).
+	collected := make(map[int][]worksheet.Cell)
+	rowNum := 0
+	for row := range sheet.Rows(true) {
+		if rowNum >= anchorRow && rowNum <= lastRow {
+			collected[rowNum] = row
+		}
+		if rowNum > lastRow {
+			break
+		}
+		rowNum++
+	}
+
+	for r := anchorRow; r <= lastRow; r++ {
+		row, ok := collected[r]
+		if !ok {
+			t.Errorf("0-based row %d (Excel row %d) not found in sparse iteration", r, r+1)
+			continue
+		}
+		if len(row) == 0 {
+			t.Errorf("0-based row %d (Excel row %d): row is empty", r, r+1)
+			continue
+		}
+		v, ok := row[0].V.(string)
+		if !ok {
+			t.Errorf("0-based row %d (Excel row %d) col A: type=%T, want string", r, r+1, row[0].V)
+			continue
+		}
+		if v != "Grade" {
+			t.Errorf("0-based row %d (Excel row %d) col A = %q, want %q", r, r+1, v, "Grade")
+		}
 	}
 }
 
