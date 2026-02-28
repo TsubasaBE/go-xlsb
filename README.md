@@ -53,16 +53,29 @@ wb, err := xlsb.OpenReader(bytes.NewReader(data), int64(len(data)))
 | `Version string` | Current library version |
 | `Open(name string) (*workbook.Workbook, error)` | Open a `.xlsb` file by path |
 | `OpenReader(r io.ReaderAt, size int64) (*workbook.Workbook, error)` | Open from any `io.ReaderAt` |
-| `ConvertDate(date float64) (time.Time, error)` | Convert an Excel date serial to `time.Time` |
+| `ConvertDate(date float64) (time.Time, error)` | Convert an Excel date serial to `time.Time` (1900 system) |
+| `ConvertDateEx(date float64, date1904 bool) (time.Time, error)` | Convert a date serial respecting the workbook's date system |
+| `IsDateFormat(id int, formatStr string) bool` | Report whether a number-format ID represents a date/datetime format |
 
 ### `workbook.Workbook`
 
-| Method | Description |
+| Field / Method | Description |
 |---|---|
-| `Sheets() []string` | Ordered list of sheet names |
+| `Date1904 bool` | True when the workbook uses the 1904 date system |
+| `Sheets() []string` | Ordered list of all sheet names (visible and hidden) |
 | `Sheet(idx int) (*worksheet.Worksheet, error)` | 1-based index lookup |
 | `SheetByName(name string) (*worksheet.Worksheet, error)` | Case-insensitive name lookup |
+| `SheetVisible(name string) bool` | Report whether a named sheet is visible |
+| `SheetVisibility(name string) int` | Return visibility level: `SheetVisible` (0), `SheetHidden` (1), `SheetVeryHidden` (2), or -1 if not found |
 | `Close() error` | Release the underlying file handle |
+
+#### Sheet visibility constants
+
+```go
+workbook.SheetVisible     = 0 // tab is visible
+workbook.SheetHidden      = 1 // hidden; user can unhide via Excel UI
+workbook.SheetVeryHidden  = 2 // hidden; only accessible via VBA / programmatic access
+```
 
 ### `worksheet.Worksheet`
 
@@ -74,6 +87,7 @@ wb, err := xlsb.OpenReader(bytes.NewReader(data), int64(len(data)))
 | `Hyperlinks map[[2]int]string` | `[row, col]` to relationship ID |
 | `MergeCells []MergeArea` | All merged cell ranges in the sheet |
 | `Rows(sparse bool) func(yield func([]Cell) bool)` | Range-over-func row iterator |
+| `IsDateCell(style int) bool` | Report whether a cell's XF style index maps to a date/datetime format |
 
 `Rows(false)` emits empty rows between data rows, matching pyxlsb's default behaviour. Pass `true` to skip empty rows.
 
@@ -81,9 +95,10 @@ wb, err := xlsb.OpenReader(bytes.NewReader(data), int64(len(data)))
 
 ```go
 type Cell struct {
-    R int // 0-based row index
-    C int // 0-based column index
-    V any // nil | string | float64 | bool
+    R     int // 0-based row index
+    C     int // 0-based column index
+    V     any // nil | string | float64 | bool
+    Style int // 0-based XF index; use Worksheet.IsDateCell(cell.Style) to detect dates
 }
 ```
 
@@ -119,13 +134,15 @@ type MergeArea struct {
 
 ### Dates
 
-Excel stores dates as floating-point serial numbers (days since 1900-01-00, fractional part is time of day). Use `ConvertDate` to get a `time.Time`:
+Excel stores dates as floating-point serial numbers (days since 1900-01-00, fractional part is time of day).
+
+Use `ConvertDateEx` together with `wb.Date1904` and `sheet.IsDateCell` to correctly identify and convert date cells:
 
 ```go
 for row := range sheet.Rows(false) {
     for _, cell := range row {
-        if f, ok := cell.V.(float64); ok {
-            t, err := xlsb.ConvertDate(f)
+        if f, ok := cell.V.(float64); ok && sheet.IsDateCell(cell.Style) {
+            t, err := xlsb.ConvertDateEx(f, wb.Date1904)
             if err == nil {
                 fmt.Println(t)
             }
@@ -134,7 +151,9 @@ for row := range sheet.Rows(false) {
 }
 ```
 
-`ConvertDate` handles the Lotus 1-2-3 leap-year bug that Excel carries forward: serial 60 is a phantom date (1900-02-29 never existed) but Excel counts it anyway, so serial 61 onwards is off by one without compensation. The library skips serial 60 and maps it to 1900-03-01, keeping all subsequent serials correct.
+`ConvertDate` is a convenience wrapper for the common 1900 date system (`wb.Date1904 == false`). `ConvertDateEx` additionally handles the 1904 date system used by some workbooks (notably those originally created on macOS).
+
+Both functions handle the Lotus 1-2-3 leap-year bug that Excel carries forward in the 1900 system: serial 60 is a phantom date (1900-02-29 never existed) but Excel counts it anyway, so serial 61 onwards is off by one without compensation. The library compensates automatically.
 
 ## Credits
 
