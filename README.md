@@ -50,6 +50,7 @@ wb, err := xlsb.OpenReader(bytes.NewReader(data), int64(len(data)))
 
 | Symbol | Description |
 |---|---|
+| `Version string` | Current library version |
 | `Open(name string) (*workbook.Workbook, error)` | Open a `.xlsb` file by path |
 | `OpenReader(r io.ReaderAt, size int64) (*workbook.Workbook, error)` | Open from any `io.ReaderAt` |
 | `ConvertDate(date float64) (time.Time, error)` | Convert an Excel date serial to `time.Time` |
@@ -71,6 +72,7 @@ wb, err := xlsb.OpenReader(bytes.NewReader(data), int64(len(data)))
 | `Dimension *Dimension` | Used cell range (`nil` if not present in the file) |
 | `Cols []Col` | Column definitions |
 | `Hyperlinks map[[2]int]string` | `[row, col]` to relationship ID |
+| `MergeCells []MergeArea` | All merged cell ranges in the sheet |
 | `Rows(sparse bool) func(yield func([]Cell) bool)` | Range-over-func row iterator |
 
 `Rows(false)` emits empty rows between data rows, matching pyxlsb's default behaviour. Pass `true` to skip empty rows.
@@ -82,6 +84,36 @@ type Cell struct {
     R int // 0-based row index
     C int // 0-based column index
     V any // nil | string | float64 | bool
+}
+```
+
+### `worksheet.Dimension`
+
+```go
+type Dimension struct {
+    R int // first row index (0-based)
+    C int // first column index (0-based)
+    H int // height (number of rows)
+    W int // width (number of columns)
+}
+```
+
+### `worksheet.Col`
+
+```go
+type Col struct {
+    C1    int
+    C2    int
+    Width float64
+    Style int
+}
+```
+
+### `worksheet.MergeArea`
+
+```go
+type MergeArea struct {
+    R, C, H, W int // top-left anchor (0-based row/col), height, width
 }
 ```
 
@@ -102,7 +134,7 @@ for row := range sheet.Rows(false) {
 }
 ```
 
-`ConvertDate` handles the Lotus 1-2-3 leap-year bug that Excel carries forward (serial 60 is the phantom 1900-02-29).
+`ConvertDate` handles the Lotus 1-2-3 leap-year bug that Excel carries forward: serial 60 is a phantom date (1900-02-29 never existed) but Excel counts it anyway, so serial 61 onwards is off by one without compensation. The library skips serial 60 and maps it to 1900-03-01, keeping all subsequent serials correct.
 
 ## Credits
 
