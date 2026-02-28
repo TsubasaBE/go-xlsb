@@ -16,6 +16,7 @@ import (
 
 	"github.com/xuri/nfp"
 
+	"github.com/TsubasaBE/go-xlsb/internal/dateformat"
 	"github.com/TsubasaBE/go-xlsb/styles"
 )
 
@@ -238,6 +239,10 @@ func renderGeneral(val float64) string {
 		}
 		return s
 	}
+	// Use integer formatting when val is a whole number and small enough that
+	// float64 can represent it exactly.  float64 has 53-bit mantissa precision,
+	// so integers above 2^53 ≈ 9.0e15 may not round-trip through int64(val)
+	// accurately.  1e15 is a conservative threshold safely below that limit.
 	if val == math.Trunc(val) && abs < 1e15 {
 		return strconv.FormatInt(int64(val), 10)
 	}
@@ -249,62 +254,17 @@ func renderGeneral(val float64) string {
 // ── date-format detection (mirrors styles.isDateFormatID) ────────────────────
 
 // isDateFormat reports whether the format is a date/datetime format.
-// Mirrors the logic in styles.isDateFormatID and xlsb.IsDateFormat.
+// Mirrors the logic in styles.isDateFormatID and workbook.isDateFormatID exactly:
+// built-in IDs 14–22, 27–36, 45–47, 50–58 are date/time; all other built-in IDs
+// (id < 164) are not; custom formats (id >= 164) are scanned for date tokens.
 func isDateFormat(id int, fmtStr string) bool {
-	switch {
-	case id >= 14 && id <= 22:
-		// IDs 14-17: date formats (m/d/yy, d-mmm-yy, d-mmm, mmm-yy)
-		// IDs 18-21: time formats (h:mm AM/PM, h:mm:ss AM/PM, h:mm, h:mm:ss)
-		// ID 22: datetime format (m/d/yy h:mm)
-		return true
-	case id >= 27 && id <= 36:
-		return true
-	case id >= 45 && id <= 47:
-		return true
-	case id >= 50 && id <= 58:
+	if dateformat.IsBuiltInDateID(id) {
 		return true
 	}
-	if id < 164 && id != 0 {
+	if id < 164 {
 		return false
 	}
-	// For custom formats (id >= 164) or id==0 with a non-"General" fmtStr,
-	// scan unquoted content for date token characters.
-	inDoubleQuote := false
-	inBracket := false
-	var prev rune
-	for _, ch := range fmtStr {
-		switch {
-		case inDoubleQuote:
-			if ch == '"' {
-				inDoubleQuote = false
-			}
-		case inBracket:
-			if ch == ']' {
-				inBracket = false
-			}
-		case ch == '"':
-			inDoubleQuote = true
-		case ch == '[':
-			inBracket = true
-		case ch == 'd' || ch == 'D' ||
-			ch == 'm' || ch == 'M' ||
-			ch == 'y' || ch == 'Y' ||
-			ch == 'h' || ch == 'H' ||
-			ch == 's' || ch == 'S':
-			return true
-		case ch == 'e' || ch == 'E':
-			// E/e is a scientific-notation exponent marker when preceded by a
-			// digit placeholder (0, #, ?) — in that context it is NOT a date
-			// token. Only treat it as the Japanese era date token otherwise.
-			if prev != '0' && prev != '#' && prev != '?' && prev != '.' {
-				return true
-			}
-		}
-		if !inDoubleQuote && !inBracket {
-			prev = ch
-		}
-	}
-	return false
+	return dateformat.ScanFormatStr(fmtStr)
 }
 
 // ── date/time renderer ────────────────────────────────────────────────────────
@@ -786,11 +746,8 @@ func renderNumber(val float64, sec nfp.Section, sections []nfp.Section) string {
 		case nfp.TokenTypePercent:
 			m.hasPercent = true
 		case nfp.TokenTypeThousandsSeparator:
-			// Only count as thousands separator if it is not a trailing scaling comma.
-			// A ThousandsSeparator between digit placeholders means grouping.
-			// We detect this simply: if the token index is <= lastDigitIdx it is a
-			// grouping comma; trailing ones were already counted above.
-			m.hasThousands = true
+			// Grouping vs. scaling is determined after the loop (line 798);
+			// nothing to do here.
 		case nfp.TokenTypeDecimalPoint:
 			m.hasDecimal = true
 			// nfp quirk: when '?' or '#' immediately precede the '.' in the
@@ -909,17 +866,26 @@ func renderNumber(val float64, sec nfp.Section, sections []nfp.Section) string {
 			needsMinus = true
 		} else {
 			// Two+ sections: check whether the negative section (sec) contains
-			// a visual sign indicator — parentheses, minus, or plus literals.
-			// If it does NOT, we must still prepend the minus sign.
+			// a visual sign indicator — parentheses, minus, or plus literals,
+			// or a colour token ([Red], [Blue], etc.).  A colour-only negative
+			// section (e.g. "0;[Red]0") uses the colour as the visual
+			// distinction, so the caller must NOT also prepend a minus.
 			// (E.g. "0;0" has no wrapper → "-5" not "5".)
 			hasSignWrapper := false
 			for _, tok := range sec.Items {
-				if tok.TType == nfp.TokenTypeLiteral {
+				switch tok.TType {
+				case nfp.TokenTypeLiteral:
 					if tok.TValue == "(" || tok.TValue == ")" ||
 						tok.TValue == "-" || tok.TValue == "+" {
 						hasSignWrapper = true
-						break
 					}
+				case nfp.TokenTypeColor:
+					// A colour modifier on the negative section is itself
+					// the visual sign indicator.
+					hasSignWrapper = true
+				}
+				if hasSignWrapper {
+					break
 				}
 			}
 			if !hasSignWrapper {
@@ -1015,8 +981,26 @@ func renderNumber(val float64, sec nfp.Section, sections []nfp.Section) string {
 	}
 
 	// If the format had no placeholder tokens at all, just emit the integer.
+	// Also covers formats like ".00" where the integer part precedes the
+	// decimal but has no explicit placeholder token (afterDecimal is true but
+	// intConsumed is false): emit intStr before the already-emitted decimal+frac.
 	if !intConsumed && !afterDecimal {
 		sb.WriteString(intStr)
+	} else if !intConsumed && afterDecimal {
+		// ".00"-style: no integer placeholder, so intStr was never emitted.
+		// Prepend it to whatever has been written so far.  When needsMinus is
+		// true sb already starts with '-'; we must insert intStr after the
+		// sign so the result is "-5.50" not "5-.50".
+		current := sb.String()
+		sb.Reset()
+		if needsMinus && len(current) > 0 && current[0] == '-' {
+			sb.WriteByte('-')
+			sb.WriteString(intStr)
+			sb.WriteString(current[1:])
+		} else {
+			sb.WriteString(intStr)
+			sb.WriteString(current)
+		}
 	}
 
 	// Guard: if nothing was written (e.g. a format string whose only tokens

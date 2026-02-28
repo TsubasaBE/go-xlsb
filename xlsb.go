@@ -62,6 +62,7 @@ import (
 	"math"
 	"time"
 
+	"github.com/TsubasaBE/go-xlsb/internal/dateformat"
 	"github.com/TsubasaBE/go-xlsb/workbook"
 )
 
@@ -91,6 +92,11 @@ func OpenReader(r io.ReaderAt, size int64) (*workbook.Workbook, error) {
 //   - serial == 0  → midnight on 1900-01-01
 //   - serial >= 61 → subtract one day to compensate for the phantom leap day
 //   - 1 ≤ serial ≤ 60 → no compensation (serial 60 yields 1900-03-01)
+//
+// The fractional-day component is converted to whole seconds using the same
+// rounding algorithm as excelize (roundEpsilon + half-second rounding) so
+// that this function produces identical results to [workbook.Workbook.FormatCell]
+// for date/time cells.
 func ConvertDate(date float64) (time.Time, error) {
 	if math.IsNaN(date) || math.IsInf(date, 0) {
 		return time.Time{}, fmt.Errorf("xlsb: ConvertDate: invalid value %v", date)
@@ -98,36 +104,26 @@ func ConvertDate(date float64) (time.Time, error) {
 	if date < 0 {
 		return time.Time{}, fmt.Errorf("xlsb: ConvertDate: negative serial %v not supported", date)
 	}
-	// Excel dates only reach serial 2,958,465 (year 9999).  Values above this
-	// would overflow time.Duration arithmetic (int64 nanoseconds).
+	// Excel dates only reach serial 2,958,465 (year 9999-12-31).  The constant
+	// below is the exclusive upper bound (one above the last valid serial) used
+	// in the comparison.  Values above maxSerial-1 would overflow time.Duration
+	// arithmetic (int64 nanoseconds).
 	const maxSerial = 2_958_466
 	if date > maxSerial {
 		return time.Time{}, fmt.Errorf("xlsb: ConvertDate: serial %v exceeds maximum supported value %d", date, maxSerial)
 	}
 
-	base := time.Date(1899, 12, 31, 0, 0, 0, 0, time.UTC)
-	intPart := int(date)
-	// fractional seconds (sub-day time component).
-	// Clamp to [0, 86399] to guard against floating-point rounding artefacts
-	// near whole numbers (e.g. 0.9999999... rounding up to 86400, which would
-	// add a phantom extra day on top of intPart).
-	fracSec := int64(math.Round((date - math.Trunc(date)) * 24 * 60 * 60))
-	if fracSec < 0 {
-		fracSec = 0
-	} else if fracSec > 86399 {
-		fracSec = 86399
-	}
+	fracSec, dayRollover := serialToFracSec(date)
 
+	base := time.Date(1899, 12, 31, 0, 0, 0, 0, time.UTC)
+	intPart := int(date) + dayRollover
 	var t time.Time
 	switch {
 	case intPart == 0:
-		// Serial 0 → 1900-01-01 plus fractional seconds
 		t = time.Date(1900, 1, 1, 0, 0, 0, 0, time.UTC).Add(time.Duration(fracSec) * time.Second)
 	case intPart >= 61:
-		// Subtract 1 day to skip the phantom 1900-02-29
 		t = base.Add(time.Duration(intPart-1)*24*time.Hour + time.Duration(fracSec)*time.Second)
 	default:
-		// Serials 1–60: no correction
 		t = base.Add(time.Duration(intPart)*24*time.Hour + time.Duration(fracSec)*time.Second)
 	}
 	return t, nil
@@ -162,19 +158,44 @@ func ConvertDateEx(date float64, date1904 bool) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("xlsb: ConvertDateEx: serial %v exceeds maximum supported value %d", date, maxSerial)
 	}
 
+	fracSec, dayRollover := serialToFracSec(date)
+
 	// Base: 1904-01-01. Serial 0 = 1904-01-01, serial 1 = 1904-01-02, etc.
 	// No phantom leap-day correction is needed for the 1904 date system.
 	base := time.Date(1904, 1, 1, 0, 0, 0, 0, time.UTC)
-	intPart := int(date)
-	fracSec := int64(math.Round((date - math.Trunc(date)) * 24 * 60 * 60))
-	if fracSec < 0 {
-		fracSec = 0
-	} else if fracSec > 86399 {
-		fracSec = 86399
-	}
-
+	intPart := int(date) + dayRollover
 	t := base.Add(time.Duration(intPart)*24*time.Hour + time.Duration(fracSec)*time.Second)
 	return t, nil
+}
+
+// serialToFracSec converts the fractional-day part of an Excel serial to a
+// whole-second count within the day (0–86399), plus a day-rollover flag (0 or 1).
+//
+// The algorithm mirrors excelize's timeFromExcelTime and numfmt.convertSerial:
+//   - add roundEpsilon (1e-9) to the fractional day to avoid floating-point drift
+//   - convert to nanoseconds and round to the nearest second (half-second rule)
+//   - when rounding pushes the result to exactly 86400 s (midnight), roll over
+//     to the next day rather than clamping
+//
+// Both ConvertDate and ConvertDateEx use this helper so they remain in sync
+// with numfmt.convertSerial without a circular import.
+func serialToFracSec(serial float64) (fracSec int64, dayRollover int) {
+	const roundEpsilon = 1e-9
+	fracDay := (serial - math.Trunc(serial)) + roundEpsilon
+	const nanosInADay = float64(24 * 60 * 60 * 1e9)
+	durNanos := time.Duration(fracDay * nanosInADay)
+	ns := int(durNanos % time.Second)
+	secs := int64(durNanos / time.Second)
+	if ns > 500_000_000 {
+		secs++
+	}
+	if secs < 0 {
+		secs = 0
+	}
+	// When rounding pushes secs to 86400 (midnight), roll over to the next day.
+	rollover := int(secs / 86400)
+	secs = secs % 86400
+	return secs, rollover
 }
 
 // IsDateFormat reports whether a number-format ID (and optional custom format
@@ -216,37 +237,5 @@ func IsDateFormat(id int, formatStr string) bool {
 		return false // other built-in IDs are not dates
 	}
 	// Custom format: scan unquoted characters for date/time tokens.
-	inDoubleQuote := false
-	inBracket := false
-	var prev rune
-	for _, ch := range formatStr {
-		switch {
-		case inDoubleQuote:
-			if ch == '"' {
-				inDoubleQuote = false
-			}
-		case inBracket:
-			if ch == ']' {
-				inBracket = false
-			}
-		case ch == '"':
-			inDoubleQuote = true
-		case ch == '[':
-			inBracket = true
-		case ch == 'd' || ch == 'D' ||
-			ch == 'm' || ch == 'M' ||
-			ch == 'y' || ch == 'Y' ||
-			ch == 'h' || ch == 'H' ||
-			ch == 's' || ch == 'S':
-			return true
-		case ch == 'e' || ch == 'E':
-			if prev != '0' && prev != '#' && prev != '?' && prev != '.' {
-				return true
-			}
-		}
-		if !inDoubleQuote && !inBracket {
-			prev = ch
-		}
-	}
-	return false
+	return dateformat.ScanFormatStr(formatStr)
 }

@@ -5,12 +5,13 @@ import (
 	"archive/zip"
 	"bytes"
 	"encoding/binary"
-	"encoding/xml"
 	"fmt"
 	"io"
 	"strings"
 
 	"github.com/TsubasaBE/go-xlsb/biff12"
+	"github.com/TsubasaBE/go-xlsb/internal/dateformat"
+	"github.com/TsubasaBE/go-xlsb/internal/rels"
 	"github.com/TsubasaBE/go-xlsb/numfmt"
 	"github.com/TsubasaBE/go-xlsb/record"
 	"github.com/TsubasaBE/go-xlsb/stringtable"
@@ -41,8 +42,9 @@ type sheetEntry struct {
 
 // Workbook represents an open .xlsb workbook.
 type Workbook struct {
-	zr          *zip.ReadCloser // non-nil when opened by file name
-	zf          *zip.Reader     // always non-nil
+	zr          *zip.ReadCloser      // non-nil when opened by file name
+	zf          *zip.Reader          // always non-nil
+	zipIndex    map[string]*zip.File // name → entry, built once at open time
 	sheets      []sheetEntry
 	stringTable *stringtable.StringTable
 	// Styles is the full XF style table parsed from xl/styles.bin.  It is
@@ -65,6 +67,7 @@ func Open(name string) (*Workbook, error) {
 		return nil, fmt.Errorf("workbook: open %q: %w", name, err)
 	}
 	wb := &Workbook{zr: rc, zf: &rc.Reader}
+	wb.buildZipIndex()
 	if err := wb.parse(); err != nil {
 		_ = rc.Close()
 		return nil, err
@@ -80,6 +83,7 @@ func OpenReader(r io.ReaderAt, size int64) (*Workbook, error) {
 		return nil, fmt.Errorf("workbook: open reader: %w", err)
 	}
 	wb := &Workbook{zf: zf}
+	wb.buildZipIndex()
 	if err := wb.parse(); err != nil {
 		return nil, err
 	}
@@ -255,17 +259,18 @@ func (wb *Workbook) parseSharedStrings() error {
 }
 
 // parseStyles reads xl/styles.bin and builds the StyleTable.
-// Failures are silently ignored so that workbooks without styles.bin
-// (or with malformed styles) still open correctly — FormatCell will fall
-// back to fmt.Sprint for all cells.
+// When the file is absent the function returns nil — styles are optional and
+// FormatCell will fall back to fmt.Sprint for all cells.
+// When the file is present but corrupt a non-nil error is returned so the
+// caller is aware the workbook opened in a degraded state.
 func (wb *Workbook) parseStyles() error {
 	data, err := wb.readZipEntry("xl/styles.bin")
 	if err != nil {
-		return nil // optional
+		return nil // optional — absent styles.bin is not an error
 	}
 	st, err := parseStyleTable(data)
 	if err != nil {
-		return nil // degrade gracefully
+		return fmt.Errorf("workbook: styles: %w", err)
 	}
 	wb.Styles = st
 	return nil
@@ -348,55 +353,13 @@ func parseStyleTable(data []byte) (styles.StyleTable, error) {
 // IDs 18–21 as date/time formats (they are used in rendering via numfmt and
 // must round-trip correctly through FormatCell).
 func isDateFormatID(id int, formatStr string) bool {
-	switch {
-	case id >= 14 && id <= 22:
-		// IDs 14-17: date formats (m/d/yy, d-mmm-yy, d-mmm, mmm-yy)
-		// IDs 18-21: time formats (h:mm AM/PM, h:mm:ss AM/PM, h:mm, h:mm:ss)
-		// ID 22: datetime format (m/d/yy h:mm)
-		return true
-	case id >= 27 && id <= 36:
-		return true
-	case id >= 45 && id <= 47:
-		return true
-	case id >= 50 && id <= 58:
+	if dateformat.IsBuiltInDateID(id) {
 		return true
 	}
 	if id < 164 {
 		return false
 	}
-	inDoubleQuote := false
-	inBracket := false
-	var prev rune
-	for _, ch := range formatStr {
-		switch {
-		case inDoubleQuote:
-			if ch == '"' {
-				inDoubleQuote = false
-			}
-		case inBracket:
-			if ch == ']' {
-				inBracket = false
-			}
-		case ch == '"':
-			inDoubleQuote = true
-		case ch == '[':
-			inBracket = true
-		case ch == 'd' || ch == 'D' ||
-			ch == 'm' || ch == 'M' ||
-			ch == 'y' || ch == 'Y' ||
-			ch == 'h' || ch == 'H' ||
-			ch == 's' || ch == 'S':
-			return true
-		case ch == 'e' || ch == 'E':
-			if prev != '0' && prev != '#' && prev != '?' && prev != '.' {
-				return true
-			}
-		}
-		if !inDoubleQuote && !inBracket {
-			prev = ch
-		}
-	}
-	return false
+	return dateformat.ScanFormatStr(formatStr)
 }
 
 // openSheet reads the binary data for the given sheet entry and returns a
@@ -427,27 +390,37 @@ func (wb *Workbook) openSheet(entry sheetEntry) (*worksheet.Worksheet, error) {
 }
 
 // readZipEntry reads the full contents of a named entry from the ZIP archive.
+// It uses the pre-built zipIndex for O(1) lookup instead of a linear scan.
 func (wb *Workbook) readZipEntry(name string) ([]byte, error) {
-	for _, f := range wb.zf.File {
-		if f.Name == name {
-			rc, err := f.Open()
-			if err != nil {
-				return nil, err
-			}
-			data, readErr := io.ReadAll(rc)
-			closeErr := rc.Close()
-			if readErr != nil {
-				return nil, readErr
-			}
-			// Propagate decompressor checksum / close errors even when the read
-			// appeared to succeed (e.g. truncated gzip stream).
-			if closeErr != nil {
-				return nil, closeErr
-			}
-			return data, nil
-		}
+	f, ok := wb.zipIndex[name]
+	if !ok {
+		return nil, fmt.Errorf("%q not found in archive", name)
 	}
-	return nil, fmt.Errorf("%q not found in archive", name)
+	rc, err := f.Open()
+	if err != nil {
+		return nil, err
+	}
+	data, readErr := io.ReadAll(rc)
+	closeErr := rc.Close()
+	if readErr != nil {
+		return nil, readErr
+	}
+	// Propagate decompressor checksum / close errors even when the read
+	// appeared to succeed (e.g. truncated gzip stream).
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	return data, nil
+}
+
+// buildZipIndex constructs wb.zipIndex from wb.zf.File, enabling O(1) lookups
+// in readZipEntry.  When duplicate names exist, the last entry wins; this
+// matches ZIP tools that append updated entries at the end of the archive.
+func (wb *Workbook) buildZipIndex() {
+	wb.zipIndex = make(map[string]*zip.File, len(wb.zf.File))
+	for _, f := range wb.zf.File {
+		wb.zipIndex[f.Name] = f
+	}
 }
 
 // readRels parses a .rels XML file and returns a map of Id → Target.
@@ -456,30 +429,7 @@ func (wb *Workbook) readRels(name string) (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return parseRelsXML(data)
-}
-
-// ── XML relationship parsing ──────────────────────────────────────────────────
-
-type xmlRelationships struct {
-	Relationships []xmlRelationship `xml:"Relationship"`
-}
-
-type xmlRelationship struct {
-	ID     string `xml:"Id,attr"`
-	Target string `xml:"Target,attr"`
-}
-
-func parseRelsXML(data []byte) (map[string]string, error) {
-	var rels xmlRelationships
-	if err := xml.Unmarshal(data, &rels); err != nil {
-		return nil, fmt.Errorf("parse rels XML: %w", err)
-	}
-	m := make(map[string]string, len(rels.Relationships))
-	for _, r := range rels.Relationships {
-		m[r.ID] = r.Target
-	}
-	return m, nil
+	return rels.ParseRelsXML(data)
 }
 
 // ── SHEET record parsing ───────────────────────────────────────────────────────

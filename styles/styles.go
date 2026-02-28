@@ -4,6 +4,8 @@
 // circular imports.
 package styles
 
+import "github.com/TsubasaBE/go-xlsb/internal/dateformat"
+
 // XFStyle holds the resolved formatting information for one XF (cell-format)
 // index as read from the CellXfs table in xl/styles.bin.
 type XFStyle struct {
@@ -129,54 +131,11 @@ var BuiltInNumFmt = map[int]string{
 // IDs 18–21 as date/time formats so that cells with time-only number formats
 // are handled correctly in [StyleTable.IsDate] and during rendering.
 func isDateFormatID(id int, formatStr string) bool {
-	switch {
-	case id >= 14 && id <= 22:
-		// IDs 14-17: date formats (m/d/yy, d-mmm-yy, d-mmm, mmm-yy)
-		// IDs 18-21: time formats (h:mm AM/PM, h:mm:ss AM/PM, h:mm, h:mm:ss)
-		// ID 22: datetime format (m/d/yy h:mm)
-		return true
-	case id >= 27 && id <= 36:
-		return true
-	case id >= 45 && id <= 47:
-		return true
-	case id >= 50 && id <= 58:
+	if dateformat.IsBuiltInDateID(id) {
 		return true
 	}
 	if id < 164 {
 		return false
 	}
-	// Custom format: scan the unquoted portion for date/time token characters.
-	inDoubleQuote := false
-	inBracket := false
-	var prev rune
-	for _, ch := range formatStr {
-		switch {
-		case inDoubleQuote:
-			if ch == '"' {
-				inDoubleQuote = false
-			}
-		case inBracket:
-			if ch == ']' {
-				inBracket = false
-			}
-		case ch == '"':
-			inDoubleQuote = true
-		case ch == '[':
-			inBracket = true
-		case ch == 'd' || ch == 'D' ||
-			ch == 'm' || ch == 'M' ||
-			ch == 'y' || ch == 'Y' ||
-			ch == 'h' || ch == 'H' ||
-			ch == 's' || ch == 'S':
-			return true
-		case ch == 'e' || ch == 'E':
-			if prev != '0' && prev != '#' && prev != '?' && prev != '.' {
-				return true
-			}
-		}
-		if !inDoubleQuote && !inBracket {
-			prev = ch
-		}
-	}
-	return false
+	return dateformat.ScanFormatStr(formatStr)
 }

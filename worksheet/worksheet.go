@@ -4,11 +4,11 @@ package worksheet
 
 import (
 	"bytes"
-	"encoding/xml"
 	"fmt"
 	"io"
 
 	"github.com/TsubasaBE/go-xlsb/biff12"
+	"github.com/TsubasaBE/go-xlsb/internal/rels"
 	"github.com/TsubasaBE/go-xlsb/record"
 	"github.com/TsubasaBE/go-xlsb/stringtable"
 	"github.com/TsubasaBE/go-xlsb/styles"
@@ -92,6 +92,11 @@ type Worksheet struct {
 	Hyperlinks map[[2]int]string
 	// MergeCells contains all merged-cell ranges defined in the sheet.
 	MergeCells []MergeArea
+	// Err holds the first I/O or parse error encountered during Rows()
+	// iteration, if any.  It is nil when iteration completed without error.
+	// Callers should check Err after the range loop when they need to
+	// distinguish a clean end-of-data from a truncated or corrupt stream.
+	Err error
 
 	data         []byte                           // full binary payload
 	dataOffset   int64                            // byte offset of SHEETDATA record payload
@@ -118,9 +123,9 @@ func New(name string, data []byte, relsData []byte, st *stringtable.StringTable,
 		formatFn:    formatFn,
 	}
 	if len(relsData) > 0 {
-		rels, err := parseRelsXML(relsData)
+		r, err := rels.ParseRelsXML(relsData)
 		if err == nil {
-			ws.rels = rels
+			ws.rels = r
 		}
 	}
 	if err := ws.parse(); err != nil {
@@ -155,9 +160,16 @@ func (ws *Worksheet) FormatCell(cell Cell) string {
 // subsequent row (vertical merge) — return nil, matching the behaviour of
 // excelize's GetRows.
 //
+// If the underlying stream is truncated or corrupt, iteration stops early and
+// ws.Err is set to a non-nil error.  Callers should check ws.Err after the
+// range loop to distinguish a clean end-of-data from an error.
+//
 // Rows uses Go 1.22+ range-over-func semantics.
 func (ws *Worksheet) Rows(sparse bool) func(yield func([]Cell) bool) {
 	return func(yield func([]Cell) bool) {
+		// Reset any error from a previous call.
+		ws.Err = nil
+
 		// If the pre-scan never found a SHEETDATA record, the file is malformed.
 		// Yield nothing rather than seeking to byte 0 and parsing garbage.
 		if !ws.hasSheetData {
@@ -166,16 +178,22 @@ func (ws *Worksheet) Rows(sparse bool) func(yield func([]Cell) bool) {
 
 		rdr := record.NewReader(bytes.NewReader(ws.data))
 		if _, err := rdr.Seek(ws.dataOffset, io.SeekStart); err != nil {
+			ws.Err = err
 			return
 		}
 
 		dim := ws.effectiveDim()
 		rowNum := -1
 		var row []Cell
+		stopped := false // true once yield returned false
 
 		for {
 			recID, recData, err := rdr.Next()
 			if err != nil {
+				// io.EOF is the normal clean end — no error to report.
+				if err != io.EOF {
+					ws.Err = err
+				}
 				break
 			}
 
@@ -193,9 +211,12 @@ func (ws *Worksheet) Rows(sparse bool) func(yield func([]Cell) bool) {
 					continue
 				}
 				if row != nil {
-					if !yield(row) {
-						return
+					if !stopped && !yield(row) {
+						stopped = true
 					}
+				}
+				if stopped {
+					return
 				}
 				if !sparse {
 					for rowNum < r-1 {
@@ -221,14 +242,14 @@ func (ws *Worksheet) Rows(sparse bool) func(yield func([]Cell) bool) {
 				}
 
 			case recID == biff12.SheetDataEnd:
-				if row != nil {
-					yield(row) // caller may have stopped; return either way
+				if row != nil && !stopped {
+					yield(row) //nolint:errcheck // consumer already stopped or clean end
 				}
 				return
 			}
 		}
-		if row != nil {
-			yield(row) // caller may have stopped; nothing to do after this
+		if row != nil && !stopped {
+			yield(row) //nolint:errcheck // consumer already stopped or clean end
 		}
 	}
 }
@@ -299,7 +320,11 @@ func (ws *Worksheet) parse() error {
 			for {
 				id, _, err := rdr.Next()
 				if err != nil {
-					return nil // truncated stream — treat as end
+					// A read error here means the stream is truncated inside
+					// SheetData.  Return the error so the caller knows the
+					// worksheet data is incomplete rather than silently
+					// treating it as a valid (empty) sheet.
+					return fmt.Errorf("worksheet: reading SheetData records: %w", err)
 				}
 				if id == biff12.SheetDataEnd {
 					break
@@ -408,15 +433,18 @@ func parseColRecord(data []byte) (Col, error) {
 	}
 	// Guard: style is an unvalidated uint32; cap to MaxInt32 so that
 	// int(style) produces the same value on both 32-bit and 64-bit platforms.
+	// Out-of-range indices are clamped to 0 (default style) rather than
+	// aborting, matching the behaviour of parseCellRecord.
 	const maxStyleIndex = 0x7FFFFFFF
+	styleIdx := int(style)
 	if style > maxStyleIndex {
-		return Col{}, fmt.Errorf("worksheet: column style index %d exceeds limit", style)
+		styleIdx = 0
 	}
 	return Col{
 		C1:    int(c1),
 		C2:    int(c2),
 		Width: float64(widthRaw) / 256,
-		Style: int(style),
+		Style: styleIdx,
 	}, nil
 }
 
@@ -594,6 +622,16 @@ func parseMergeCellRecord(data []byte) (MergeArea, error) {
 	if c2 < c1 {
 		return MergeArea{}, fmt.Errorf("mergecell: c2 (%d) < c1 (%d)", c2, c1)
 	}
+	// Cap to Excel maxima to prevent corrupt records producing enormous H/W
+	// values that could cause problems in downstream range iterations.
+	const maxRow = 0xFFFFF
+	const maxCol = 0x3FFF
+	if r2 > maxRow {
+		return MergeArea{}, fmt.Errorf("mergecell: r2 (%d) exceeds Excel maximum row index %d", r2, maxRow)
+	}
+	if c2 > maxCol {
+		return MergeArea{}, fmt.Errorf("mergecell: c2 (%d) exceeds Excel maximum column index %d", c2, maxCol)
+	}
 	return MergeArea{
 		R: int(r1),
 		C: int(c1),
@@ -662,27 +700,4 @@ func parseHyperlinkRecord(data []byte) (hyperlinkRecord, error) {
 		W:   int(c2-c1) + 1,
 		RID: rID,
 	}, nil
-}
-
-// ── XML relationship parsing (duplicated from workbook to avoid circular dep) ─
-
-type xmlRelationships struct {
-	Relationships []xmlRelationship `xml:"Relationship"`
-}
-
-type xmlRelationship struct {
-	ID     string `xml:"Id,attr"`
-	Target string `xml:"Target,attr"`
-}
-
-func parseRelsXML(data []byte) (map[string]string, error) {
-	var rels xmlRelationships
-	if err := xml.Unmarshal(data, &rels); err != nil {
-		return nil, fmt.Errorf("parse rels XML: %w", err)
-	}
-	m := make(map[string]string, len(rels.Relationships))
-	for _, r := range rels.Relationships {
-		m[r.ID] = r.Target
-	}
-	return m, nil
 }

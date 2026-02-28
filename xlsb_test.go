@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/TsubasaBE/go-xlsb"
+	"github.com/TsubasaBE/go-xlsb/biff12"
 	"github.com/TsubasaBE/go-xlsb/numfmt"
 	"github.com/TsubasaBE/go-xlsb/record"
 	"github.com/TsubasaBE/go-xlsb/stringtable"
@@ -313,68 +314,26 @@ func TestStringTable(t *testing.T) {
 func buildMinimalXLSB(t *testing.T) []byte {
 	t.Helper()
 
-	// ── helpers ───────────────────────────────────────────────────────────────
-
-	writeID := func(buf *bytes.Buffer, id int) {
-		if id < 0x80 {
-			buf.WriteByte(byte(id))
-		} else {
-			buf.WriteByte(byte(id & 0xFF))
-			buf.WriteByte(byte(id >> 8))
-		}
-	}
-	writeLen := func(buf *bytes.Buffer, n int) {
-		for {
-			b := n & 0x7F
-			n >>= 7
-			if n > 0 {
-				buf.WriteByte(byte(b) | 0x80)
-			} else {
-				buf.WriteByte(byte(b))
-				break
-			}
-		}
-	}
-	writeRec := func(buf *bytes.Buffer, id int, payload []byte) {
-		writeID(buf, id)
-		writeLen(buf, len(payload))
-		buf.Write(payload)
-	}
-	encStr := func(s string) []byte {
-		runes := []rune(s)
-		var sb bytes.Buffer
-		_ = binary.Write(&sb, binary.LittleEndian, uint32(len(runes)))
-		for _, r := range runes {
-			_ = binary.Write(&sb, binary.LittleEndian, uint16(r))
-		}
-		return sb.Bytes()
-	}
-	le32 := func(v uint32) []byte {
-		b := make([]byte, 4)
-		binary.LittleEndian.PutUint32(b, v)
-		return b
-	}
-
 	// ── xl/workbook.bin ───────────────────────────────────────────────────────
 
 	var wb bytes.Buffer
 	// WORKBOOK start
-	writeRec(&wb, 0x0183, nil)
+	biff12WriteRec(&wb, 0x0183, nil)
 	// SHEETS start
-	writeRec(&wb, 0x018F, nil)
+	biff12WriteRec(&wb, 0x018F, nil)
 
 	// SHEET record: skip(4) + sheetId(4) + relId(string) + name(string)
 	var sheetRec bytes.Buffer
-	sheetRec.Write(le32(0))             // 4 unknown bytes (state flags)
-	sheetRec.Write(le32(1))             // sheetId = 1
-	sheetRec.Write(encStr("rId1"))      // relId
-	sheetRec.Write(encStr("TestSheet")) // name
-	writeRec(&wb, 0x019C, sheetRec.Bytes())
+	sheetRec.Write(biff12Le32(0))             // 4 unknown bytes (state flags)
+	sheetRec.Write(biff12Le32(1))             // sheetId = 1
+	sheetRec.Write(biff12EncStr("rId1"))      // relId
+	sheetRec.Write(biff12EncStr("TestSheet")) // name
+	biff12WriteRec(&wb, 0x019C, sheetRec.Bytes())
 
 	// SHEETS end
-	writeRec(&wb, 0x0190, nil)
+	biff12WriteRec(&wb, 0x0190, nil)
 	// WORKBOOK end
-	writeRec(&wb, 0x0184, nil)
+	biff12WriteRec(&wb, 0x0184, nil)
 
 	// ── xl/sharedStrings.bin ──────────────────────────────────────────────────
 
@@ -384,66 +343,55 @@ func buildMinimalXLSB(t *testing.T) []byte {
 
 	var ws bytes.Buffer
 	// WORKSHEET start
-	writeRec(&ws, 0x0181, nil)
+	biff12WriteRec(&ws, 0x0181, nil)
 	// DIMENSION: r1=0, r2=0, c1=0, c2=1
 	var dimPayload bytes.Buffer
-	dimPayload.Write(le32(0)) // r1
-	dimPayload.Write(le32(0)) // r2
-	dimPayload.Write(le32(0)) // c1
-	dimPayload.Write(le32(1)) // c2
-	writeRec(&ws, 0x0194, dimPayload.Bytes())
+	dimPayload.Write(biff12Le32(0)) // r1
+	dimPayload.Write(biff12Le32(0)) // r2
+	dimPayload.Write(biff12Le32(0)) // c1
+	dimPayload.Write(biff12Le32(1)) // c2
+	biff12WriteRec(&ws, 0x0194, dimPayload.Bytes())
 	// SHEETDATA start
-	writeRec(&ws, 0x0191, nil)
+	biff12WriteRec(&ws, 0x0191, nil)
 
 	// ROW record: r=0
-	writeRec(&ws, 0x0000, le32(0))
+	biff12WriteRec(&ws, 0x0000, biff12Le32(0))
 
 	// FLOAT cell at col 0: col(4) + style(4) + double(8) = 42.0
 	var floatCell bytes.Buffer
-	floatCell.Write(le32(0)) // col
-	floatCell.Write(le32(0)) // style
+	floatCell.Write(biff12Le32(0)) // col
+	floatCell.Write(biff12Le32(0)) // style
 	var f64buf [8]byte
 	binary.LittleEndian.PutUint64(f64buf[:], 0x4045000000000000) // 42.0
 	floatCell.Write(f64buf[:])
-	writeRec(&ws, 0x0005, floatCell.Bytes()) // FLOAT
+	biff12WriteRec(&ws, 0x0005, floatCell.Bytes()) // FLOAT
 
 	// STRING cell at col 1: col(4) + style(4) + index(4) = shared string 0 = "hello"
 	var strCell bytes.Buffer
-	strCell.Write(le32(1))                 // col
-	strCell.Write(le32(0))                 // style
-	strCell.Write(le32(0))                 // shared string index 0
-	writeRec(&ws, 0x0007, strCell.Bytes()) // STRING
+	strCell.Write(biff12Le32(1))                 // col
+	strCell.Write(biff12Le32(0))                 // style
+	strCell.Write(biff12Le32(0))                 // shared string index 0
+	biff12WriteRec(&ws, 0x0007, strCell.Bytes()) // STRING
 
 	// SHEETDATA end
-	writeRec(&ws, 0x0192, nil)
+	biff12WriteRec(&ws, 0x0192, nil)
 	// WORKSHEET end
-	writeRec(&ws, 0x0182, nil)
+	biff12WriteRec(&ws, 0x0182, nil)
 
 	// ── assemble ZIP ─────────────────────────────────────────────────────────
 
 	var zipBuf bytes.Buffer
 	zw := zip.NewWriter(&zipBuf)
 
-	addFile := func(name string, data []byte) {
-		t.Helper()
-		f, err := zw.Create(name)
-		if err != nil {
-			t.Fatalf("zip create %s: %v", name, err)
-		}
-		if _, err := f.Write(data); err != nil {
-			t.Fatalf("zip write %s: %v", name, err)
-		}
-	}
-
 	// Workbook relationship file
 	relsXML := `<?xml version="1.0" encoding="UTF-8"?>` +
 		`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
 		`<Relationship Id="rId1" Type="worksheet" Target="worksheets/sheet1.bin"/>` +
 		`</Relationships>`
-	addFile("xl/_rels/workbook.bin.rels", []byte(relsXML))
-	addFile("xl/workbook.bin", wb.Bytes())
-	addFile("xl/sharedStrings.bin", sstBuf.Bytes())
-	addFile("xl/worksheets/sheet1.bin", ws.Bytes())
+	zipAddFile(t, zw, "xl/_rels/workbook.bin.rels", []byte(relsXML))
+	zipAddFile(t, zw, "xl/workbook.bin", wb.Bytes())
+	zipAddFile(t, zw, "xl/sharedStrings.bin", sstBuf.Bytes())
+	zipAddFile(t, zw, "xl/worksheets/sheet1.bin", ws.Bytes())
 
 	if err := zw.Close(); err != nil {
 		t.Fatalf("zip close: %v", err)
@@ -598,137 +546,88 @@ func TestRecordReaderUnicode(t *testing.T) {
 func buildMergeXLSB(t *testing.T) []byte {
 	t.Helper()
 
-	writeID := func(buf *bytes.Buffer, id int) {
-		if id < 0x80 {
-			buf.WriteByte(byte(id))
-		} else {
-			buf.WriteByte(byte(id & 0xFF))
-			buf.WriteByte(byte(id >> 8))
-		}
-	}
-	writeLen := func(buf *bytes.Buffer, n int) {
-		for {
-			b := n & 0x7F
-			n >>= 7
-			if n > 0 {
-				buf.WriteByte(byte(b) | 0x80)
-			} else {
-				buf.WriteByte(byte(b))
-				break
-			}
-		}
-	}
-	writeRec := func(buf *bytes.Buffer, id int, payload []byte) {
-		writeID(buf, id)
-		writeLen(buf, len(payload))
-		buf.Write(payload)
-	}
-	encStr := func(s string) []byte {
-		runes := []rune(s)
-		var sb bytes.Buffer
-		_ = binary.Write(&sb, binary.LittleEndian, uint32(len(runes)))
-		for _, r := range runes {
-			_ = binary.Write(&sb, binary.LittleEndian, uint16(r))
-		}
-		return sb.Bytes()
-	}
-	le32 := func(v uint32) []byte {
-		b := make([]byte, 4)
-		binary.LittleEndian.PutUint32(b, v)
-		return b
-	}
 	// mergeRec encodes a MERGE_CELL record: r1, r2, c1, c2 (all uint32).
 	mergeRec := func(r1, r2, c1, c2 uint32) []byte {
 		var p bytes.Buffer
-		p.Write(le32(r1))
-		p.Write(le32(r2))
-		p.Write(le32(c1))
-		p.Write(le32(c2))
+		p.Write(biff12Le32(r1))
+		p.Write(biff12Le32(r2))
+		p.Write(biff12Le32(c1))
+		p.Write(biff12Le32(c2))
 		return p.Bytes()
 	}
 	// formulaStringCell encodes a FormulaString cell: col(4)+style(4)+string.
 	formulaStringCell := func(col uint32, s string) []byte {
 		var p bytes.Buffer
-		p.Write(le32(col))
-		p.Write(le32(0)) // style
-		p.Write(encStr(s))
+		p.Write(biff12Le32(col))
+		p.Write(biff12Le32(0)) // style
+		p.Write(biff12EncStr(s))
 		return p.Bytes()
 	}
 
 	// ── xl/workbook.bin ───────────────────────────────────────────────────────
 
 	var wb bytes.Buffer
-	writeRec(&wb, 0x0183, nil) // WORKBOOK start
-	writeRec(&wb, 0x018F, nil) // SHEETS start
+	biff12WriteRec(&wb, 0x0183, nil) // WORKBOOK start
+	biff12WriteRec(&wb, 0x018F, nil) // SHEETS start
 	var sheetRec bytes.Buffer
-	sheetRec.Write(le32(0))
-	sheetRec.Write(le32(1))
-	sheetRec.Write(encStr("rId1"))
-	sheetRec.Write(encStr("MergeSheet"))
-	writeRec(&wb, 0x019C, sheetRec.Bytes())
-	writeRec(&wb, 0x0190, nil) // SHEETS end
-	writeRec(&wb, 0x0184, nil) // WORKBOOK end
+	sheetRec.Write(biff12Le32(0))
+	sheetRec.Write(biff12Le32(1))
+	sheetRec.Write(biff12EncStr("rId1"))
+	sheetRec.Write(biff12EncStr("MergeSheet"))
+	biff12WriteRec(&wb, 0x019C, sheetRec.Bytes())
+	biff12WriteRec(&wb, 0x0190, nil) // SHEETS end
+	biff12WriteRec(&wb, 0x0184, nil) // WORKBOOK end
 
 	// ── xl/worksheets/sheet1.bin ──────────────────────────────────────────────
 
 	var ws bytes.Buffer
-	writeRec(&ws, 0x0181, nil) // WORKSHEET start
+	biff12WriteRec(&ws, 0x0181, nil) // WORKSHEET start
 
 	// DIMENSION: rows 0–4, cols 0–2
 	var dimPay bytes.Buffer
-	dimPay.Write(le32(0)) // r1
-	dimPay.Write(le32(4)) // r2
-	dimPay.Write(le32(0)) // c1
-	dimPay.Write(le32(2)) // c2
-	writeRec(&ws, 0x0194, dimPay.Bytes())
+	dimPay.Write(biff12Le32(0)) // r1
+	dimPay.Write(biff12Le32(4)) // r2
+	dimPay.Write(biff12Le32(0)) // c1
+	dimPay.Write(biff12Le32(2)) // c2
+	biff12WriteRec(&ws, 0x0194, dimPay.Bytes())
 
-	writeRec(&ws, 0x0191, nil) // SHEETDATA start
+	biff12WriteRec(&ws, 0x0191, nil) // SHEETDATA start
 
 	// Row 0: anchor of vertical merge — FormulaString "Grade" at col 0
-	writeRec(&ws, 0x0000, le32(0))
-	writeRec(&ws, 0x0008, formulaStringCell(0, "Grade")) // FormulaString = 0x0008
+	biff12WriteRec(&ws, 0x0000, biff12Le32(0))
+	biff12WriteRec(&ws, 0x0008, formulaStringCell(0, "Grade")) // FormulaString = 0x0008
 
 	// Row 1: satellite of vertical merge — no cell records written
-	writeRec(&ws, 0x0000, le32(1))
+	biff12WriteRec(&ws, 0x0000, biff12Le32(1))
 
 	// Row 2: satellite of vertical merge — no cell records written
-	writeRec(&ws, 0x0000, le32(2))
+	biff12WriteRec(&ws, 0x0000, biff12Le32(2))
 
 	// Row 4: anchor of horizontal merge — FormulaString "Header" at col 0
-	writeRec(&ws, 0x0000, le32(4))
-	writeRec(&ws, 0x0008, formulaStringCell(0, "Header")) // FormulaString = 0x0008
+	biff12WriteRec(&ws, 0x0000, biff12Le32(4))
+	biff12WriteRec(&ws, 0x0008, formulaStringCell(0, "Header")) // FormulaString = 0x0008
 
-	writeRec(&ws, 0x0192, nil) // SHEETDATA end
+	biff12WriteRec(&ws, 0x0192, nil) // SHEETDATA end
 
 	// MERGE_CELL records (appear after SHEETDATA in the stream)
 	// Vertical merge: A1:A3 → rows 0–2, col 0
-	writeRec(&ws, 0x00E5, mergeRec(0, 2, 0, 0)) // MergeCell = 0x00E5
+	biff12WriteRec(&ws, biff12.MergeCell, mergeRec(0, 2, 0, 0))
 	// Horizontal merge: A5:C5 → row 4, cols 0–2
-	writeRec(&ws, 0x00E5, mergeRec(4, 4, 0, 2))
+	biff12WriteRec(&ws, biff12.MergeCell, mergeRec(4, 4, 0, 2))
 
-	writeRec(&ws, 0x0182, nil) // WORKSHEET end
+	biff12WriteRec(&ws, 0x0182, nil) // WORKSHEET end
 
 	// ── assemble ZIP ─────────────────────────────────────────────────────────
 
 	var zipBuf bytes.Buffer
 	zw := zip.NewWriter(&zipBuf)
-	addFile := func(name string, data []byte) {
-		t.Helper()
-		f, err := zw.Create(name)
-		if err != nil {
-			t.Fatalf("zip create %s: %v", name, err)
-		}
-		if _, err := f.Write(data); err != nil {
-			t.Fatalf("zip write %s: %v", name, err)
-		}
-	}
 	relsXML := `<?xml version="1.0" encoding="UTF-8"?>` +
 		`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
 		`<Relationship Id="rId1" Type="worksheet" Target="worksheets/sheet1.bin"/>` +
 		`</Relationships>`
-	addFile("xl/_rels/workbook.bin.rels", []byte(relsXML))
-	addFile("xl/workbook.bin", wb.Bytes())
-	addFile("xl/worksheets/sheet1.bin", ws.Bytes())
+	zipAddFile(t, zw, "xl/_rels/workbook.bin.rels", []byte(relsXML))
+	zipAddFile(t, zw, "xl/workbook.bin", wb.Bytes())
+	zipAddFile(t, zw, "xl/worksheets/sheet1.bin", ws.Bytes())
 	if err := zw.Close(); err != nil {
 		t.Fatalf("zip close: %v", err)
 	}
@@ -750,6 +649,13 @@ func TestWorksheetVerticalMergeSatellitesEmpty(t *testing.T) {
 	sheet, err := wb.Sheet(1)
 	if err != nil {
 		t.Fatalf("Sheet(1): %v", err)
+	}
+
+	// Verify that MergeCell records were actually parsed — this is the primary
+	// regression check for the biff12WriteID / record-ID encoding fix.
+	if len(sheet.MergeCells) != 2 {
+		t.Fatalf("MergeCells: got %d entries, want 2; merge record ID may be encoded incorrectly",
+			len(sheet.MergeCells))
 	}
 
 	// Collect all rows (dense mode so every row index 0–4 is present).
@@ -895,99 +801,49 @@ func TestIsDateFormat(t *testing.T) {
 func buildMinimalXLSBWithStyle(t *testing.T, wantStyle uint32) []byte {
 	t.Helper()
 
-	writeID := func(buf *bytes.Buffer, id int) {
-		if id < 0x80 {
-			buf.WriteByte(byte(id))
-		} else {
-			buf.WriteByte(byte(id & 0xFF))
-			buf.WriteByte(byte(id >> 8))
-		}
-	}
-	writeLen := func(buf *bytes.Buffer, n int) {
-		for {
-			b := n & 0x7F
-			n >>= 7
-			if n > 0 {
-				buf.WriteByte(byte(b) | 0x80)
-			} else {
-				buf.WriteByte(byte(b))
-				break
-			}
-		}
-	}
-	writeRec := func(buf *bytes.Buffer, id int, payload []byte) {
-		writeID(buf, id)
-		writeLen(buf, len(payload))
-		buf.Write(payload)
-	}
-	encStr := func(s string) []byte {
-		runes := []rune(s)
-		var sb bytes.Buffer
-		_ = binary.Write(&sb, binary.LittleEndian, uint32(len(runes)))
-		for _, r := range runes {
-			_ = binary.Write(&sb, binary.LittleEndian, uint16(r))
-		}
-		return sb.Bytes()
-	}
-	le32 := func(v uint32) []byte {
-		b := make([]byte, 4)
-		binary.LittleEndian.PutUint32(b, v)
-		return b
-	}
-
 	// xl/workbook.bin
 	var wb bytes.Buffer
-	writeRec(&wb, 0x0183, nil)
-	writeRec(&wb, 0x018F, nil)
+	biff12WriteRec(&wb, 0x0183, nil)
+	biff12WriteRec(&wb, 0x018F, nil)
 	var sheetRec bytes.Buffer
-	sheetRec.Write(le32(0))
-	sheetRec.Write(le32(1))
-	sheetRec.Write(encStr("rId1"))
-	sheetRec.Write(encStr("Sheet1"))
-	writeRec(&wb, 0x019C, sheetRec.Bytes())
-	writeRec(&wb, 0x0190, nil)
-	writeRec(&wb, 0x0184, nil)
+	sheetRec.Write(biff12Le32(0))
+	sheetRec.Write(biff12Le32(1))
+	sheetRec.Write(biff12EncStr("rId1"))
+	sheetRec.Write(biff12EncStr("Sheet1"))
+	biff12WriteRec(&wb, 0x019C, sheetRec.Bytes())
+	biff12WriteRec(&wb, 0x0190, nil)
+	biff12WriteRec(&wb, 0x0184, nil)
 
 	// xl/worksheets/sheet1.bin  — FLOAT cell at col 0 with the requested style
 	var ws bytes.Buffer
-	writeRec(&ws, 0x0181, nil)
+	biff12WriteRec(&ws, 0x0181, nil)
 	var dimPay bytes.Buffer
-	dimPay.Write(le32(0))
-	dimPay.Write(le32(0))
-	dimPay.Write(le32(0))
-	dimPay.Write(le32(0))
-	writeRec(&ws, 0x0194, dimPay.Bytes())
-	writeRec(&ws, 0x0191, nil)
-	writeRec(&ws, 0x0000, le32(0))
+	dimPay.Write(biff12Le32(0))
+	dimPay.Write(biff12Le32(0))
+	dimPay.Write(biff12Le32(0))
+	dimPay.Write(biff12Le32(0))
+	biff12WriteRec(&ws, 0x0194, dimPay.Bytes())
+	biff12WriteRec(&ws, 0x0191, nil)
+	biff12WriteRec(&ws, 0x0000, biff12Le32(0))
 	var floatCell bytes.Buffer
-	floatCell.Write(le32(0))         // col
-	floatCell.Write(le32(wantStyle)) // style
+	floatCell.Write(biff12Le32(0))         // col
+	floatCell.Write(biff12Le32(wantStyle)) // style
 	var f64buf [8]byte
 	binary.LittleEndian.PutUint64(f64buf[:], 0x4045000000000000) // 42.0
 	floatCell.Write(f64buf[:])
-	writeRec(&ws, 0x0005, floatCell.Bytes())
-	writeRec(&ws, 0x0192, nil)
-	writeRec(&ws, 0x0182, nil)
+	biff12WriteRec(&ws, 0x0005, floatCell.Bytes())
+	biff12WriteRec(&ws, 0x0192, nil)
+	biff12WriteRec(&ws, 0x0182, nil)
 
 	var zipBuf bytes.Buffer
 	zw := zip.NewWriter(&zipBuf)
-	addFile := func(name string, data []byte) {
-		t.Helper()
-		f, err := zw.Create(name)
-		if err != nil {
-			t.Fatalf("zip create %s: %v", name, err)
-		}
-		if _, err := f.Write(data); err != nil {
-			t.Fatalf("zip write %s: %v", name, err)
-		}
-	}
 	relsXML := `<?xml version="1.0" encoding="UTF-8"?>` +
 		`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
 		`<Relationship Id="rId1" Type="worksheet" Target="worksheets/sheet1.bin"/>` +
 		`</Relationships>`
-	addFile("xl/_rels/workbook.bin.rels", []byte(relsXML))
-	addFile("xl/workbook.bin", wb.Bytes())
-	addFile("xl/worksheets/sheet1.bin", ws.Bytes())
+	zipAddFile(t, zw, "xl/_rels/workbook.bin.rels", []byte(relsXML))
+	zipAddFile(t, zw, "xl/workbook.bin", wb.Bytes())
+	zipAddFile(t, zw, "xl/worksheets/sheet1.bin", ws.Bytes())
 	if err := zw.Close(); err != nil {
 		t.Fatalf("zip close: %v", err)
 	}
@@ -1035,79 +891,40 @@ func TestCellStyleIndex(t *testing.T) {
 func buildStylesBin(t *testing.T) []byte {
 	t.Helper()
 
-	writeID := func(buf *bytes.Buffer, id int) {
-		if id < 0x80 {
-			buf.WriteByte(byte(id))
-		} else {
-			buf.WriteByte(byte(id & 0xFF))
-			buf.WriteByte(byte(id >> 8))
-		}
-	}
-	writeLen := func(buf *bytes.Buffer, n int) {
-		for {
-			b := n & 0x7F
-			n >>= 7
-			if n > 0 {
-				buf.WriteByte(byte(b) | 0x80)
-			} else {
-				buf.WriteByte(byte(b))
-				break
-			}
-		}
-	}
-	writeRec := func(buf *bytes.Buffer, id int, payload []byte) {
-		writeID(buf, id)
-		writeLen(buf, len(payload))
-		buf.Write(payload)
-	}
-	le16 := func(v uint16) []byte {
-		b := make([]byte, 2)
-		binary.LittleEndian.PutUint16(b, v)
-		return b
-	}
-	encStr := func(s string) []byte {
-		runes := []rune(s)
-		var sb bytes.Buffer
-		_ = binary.Write(&sb, binary.LittleEndian, uint32(len(runes)))
-		for _, r := range runes {
-			_ = binary.Write(&sb, binary.LittleEndian, uint16(r))
-		}
-		return sb.Bytes()
-	}
 	// BrtXF payload: ixfe(2) + numFmtId(2) + fontId(2) + fillId(2) + borderId(2) + flags(4)
 	// We only need the first four bytes correct; the rest can be zeros.
 	makeXF := func(numFmtID uint16) []byte {
 		var p bytes.Buffer
-		p.Write(le16(0))         // ixfe
-		p.Write(le16(numFmtID))  // numFmtId
-		p.Write(make([]byte, 8)) // fontId + fillId + borderId + flags (zeros)
+		p.Write(biff12Le16(0))        // ixfe
+		p.Write(biff12Le16(numFmtID)) // numFmtId
+		p.Write(make([]byte, 8))      // fontId + fillId + borderId + flags (zeros)
 		return p.Bytes()
 	}
 
 	var buf bytes.Buffer
 
 	// StyleSheet start (0x0296)
-	writeRec(&buf, 0x0296, nil)
+	biff12WriteRec(&buf, 0x0296, nil)
 
 	// BrtFmt record: numFmtId=164 + "yyyy-mm-dd"
 	var fmtPay bytes.Buffer
-	fmtPay.Write(le16(164))
-	fmtPay.Write(encStr("yyyy-mm-dd"))
-	writeRec(&buf, 0x002C, fmtPay.Bytes())
+	fmtPay.Write(biff12Le16(164))
+	fmtPay.Write(biff12EncStr("yyyy-mm-dd"))
+	biff12WriteRec(&buf, 0x002C, fmtPay.Bytes())
 
 	// CellXfs start (0x04E9)
-	writeRec(&buf, 0x04E9, nil)
+	biff12WriteRec(&buf, 0x04E9, nil)
 	// xf[0]: numFmtId=14 (built-in date)
-	writeRec(&buf, 0x002F, makeXF(14))
+	biff12WriteRec(&buf, 0x002F, makeXF(14))
 	// xf[1]: numFmtId=164 (custom date)
-	writeRec(&buf, 0x002F, makeXF(164))
+	biff12WriteRec(&buf, 0x002F, makeXF(164))
 	// xf[2]: numFmtId=0 (General)
-	writeRec(&buf, 0x002F, makeXF(0))
+	biff12WriteRec(&buf, 0x002F, makeXF(0))
 	// CellXfs end (0x04EA)
-	writeRec(&buf, 0x04EA, nil)
+	biff12WriteRec(&buf, 0x04EA, nil)
 
 	// StyleSheet end (0x0297)
-	writeRec(&buf, 0x0297, nil)
+	biff12WriteRec(&buf, 0x0297, nil)
 
 	return buf.Bytes()
 }
@@ -1116,86 +933,36 @@ func buildStylesBin(t *testing.T) []byte {
 func buildXLSBWithStylesBin(t *testing.T) []byte {
 	t.Helper()
 
-	writeID := func(buf *bytes.Buffer, id int) {
-		if id < 0x80 {
-			buf.WriteByte(byte(id))
-		} else {
-			buf.WriteByte(byte(id & 0xFF))
-			buf.WriteByte(byte(id >> 8))
-		}
-	}
-	writeLen := func(buf *bytes.Buffer, n int) {
-		for {
-			b := n & 0x7F
-			n >>= 7
-			if n > 0 {
-				buf.WriteByte(byte(b) | 0x80)
-			} else {
-				buf.WriteByte(byte(b))
-				break
-			}
-		}
-	}
-	writeRec := func(buf *bytes.Buffer, id int, payload []byte) {
-		writeID(buf, id)
-		writeLen(buf, len(payload))
-		buf.Write(payload)
-	}
-	encStr := func(s string) []byte {
-		runes := []rune(s)
-		var sb bytes.Buffer
-		_ = binary.Write(&sb, binary.LittleEndian, uint32(len(runes)))
-		for _, r := range runes {
-			_ = binary.Write(&sb, binary.LittleEndian, uint16(r))
-		}
-		return sb.Bytes()
-	}
-	le32 := func(v uint32) []byte {
-		b := make([]byte, 4)
-		binary.LittleEndian.PutUint32(b, v)
-		return b
-	}
-
 	// xl/workbook.bin
 	var wb bytes.Buffer
-	writeRec(&wb, 0x0183, nil)
-	writeRec(&wb, 0x018F, nil)
+	biff12WriteRec(&wb, 0x0183, nil)
+	biff12WriteRec(&wb, 0x018F, nil)
 	var sheetRec bytes.Buffer
-	sheetRec.Write(le32(0))
-	sheetRec.Write(le32(1))
-	sheetRec.Write(encStr("rId1"))
-	sheetRec.Write(encStr("Sheet1"))
-	writeRec(&wb, 0x019C, sheetRec.Bytes())
-	writeRec(&wb, 0x0190, nil)
-	writeRec(&wb, 0x0184, nil)
+	sheetRec.Write(biff12Le32(0))
+	sheetRec.Write(biff12Le32(1))
+	sheetRec.Write(biff12EncStr("rId1"))
+	sheetRec.Write(biff12EncStr("Sheet1"))
+	biff12WriteRec(&wb, 0x019C, sheetRec.Bytes())
+	biff12WriteRec(&wb, 0x0190, nil)
+	biff12WriteRec(&wb, 0x0184, nil)
 
 	// xl/worksheets/sheet1.bin — minimal, no cells needed
 	var ws bytes.Buffer
-	writeRec(&ws, 0x0181, nil)
-	writeRec(&ws, 0x0191, nil)
-	writeRec(&ws, 0x0192, nil)
-	writeRec(&ws, 0x0182, nil)
+	biff12WriteRec(&ws, 0x0181, nil)
+	biff12WriteRec(&ws, 0x0191, nil)
+	biff12WriteRec(&ws, 0x0192, nil)
+	biff12WriteRec(&ws, 0x0182, nil)
 
 	var zipBuf bytes.Buffer
 	zw := zip.NewWriter(&zipBuf)
-	addFile := func(name string, data []byte) {
-		t.Helper()
-		f, err := zw.Create(name)
-		if err != nil {
-			t.Fatalf("zip create %s: %v", name, err)
-		}
-		if _, err := f.Write(data); err != nil {
-			t.Fatalf("zip write %s: %v", name, err)
-		}
-	}
 	relsXML := `<?xml version="1.0" encoding="UTF-8"?>` +
 		`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
 		`<Relationship Id="rId1" Type="worksheet" Target="worksheets/sheet1.bin"/>` +
 		`</Relationships>`
-	addFile("xl/_rels/workbook.bin.rels", []byte(relsXML))
-	addFile("xl/workbook.bin", wb.Bytes())
-	addFile("xl/styles.bin", buildStylesBin(t))
-	addFile("xl/worksheets/sheet1.bin", ws.Bytes())
+	zipAddFile(t, zw, "xl/_rels/workbook.bin.rels", []byte(relsXML))
+	zipAddFile(t, zw, "xl/workbook.bin", wb.Bytes())
+	zipAddFile(t, zw, "xl/styles.bin", buildStylesBin(t))
+	zipAddFile(t, zw, "xl/worksheets/sheet1.bin", ws.Bytes())
 	if err := zw.Close(); err != nil {
 		t.Fatalf("zip close: %v", err)
 	}
@@ -1523,92 +1290,42 @@ func TestWorkbookStylesTablePopulated(t *testing.T) {
 func buildMinimalXLSBWithDate1904(t *testing.T, date1904 bool) []byte {
 	t.Helper()
 
-	writeID := func(buf *bytes.Buffer, id int) {
-		if id < 0x80 {
-			buf.WriteByte(byte(id))
-		} else {
-			buf.WriteByte(byte(id & 0xFF))
-			buf.WriteByte(byte(id >> 8))
-		}
-	}
-	writeLen := func(buf *bytes.Buffer, n int) {
-		for {
-			b := n & 0x7F
-			n >>= 7
-			if n > 0 {
-				buf.WriteByte(byte(b) | 0x80)
-			} else {
-				buf.WriteByte(byte(b))
-				break
-			}
-		}
-	}
-	writeRec := func(buf *bytes.Buffer, id int, payload []byte) {
-		writeID(buf, id)
-		writeLen(buf, len(payload))
-		buf.Write(payload)
-	}
-	encStr := func(s string) []byte {
-		runes := []rune(s)
-		var sb bytes.Buffer
-		_ = binary.Write(&sb, binary.LittleEndian, uint32(len(runes)))
-		for _, r := range runes {
-			_ = binary.Write(&sb, binary.LittleEndian, uint16(r))
-		}
-		return sb.Bytes()
-	}
-	le32 := func(v uint32) []byte {
-		b := make([]byte, 4)
-		binary.LittleEndian.PutUint32(b, v)
-		return b
-	}
-
 	var wb bytes.Buffer
-	writeRec(&wb, 0x0183, nil) // WORKBOOK start
+	biff12WriteRec(&wb, 0x0183, nil) // WORKBOOK start
 
 	// BrtWbProp (0x0199): flags uint32; bit 3 = f1904DateSystem
 	var flags uint32
 	if date1904 {
 		flags = 0x08
 	}
-	writeRec(&wb, 0x0199, le32(flags))
+	biff12WriteRec(&wb, 0x0199, biff12Le32(flags))
 
-	writeRec(&wb, 0x018F, nil) // SHEETS start
+	biff12WriteRec(&wb, 0x018F, nil) // SHEETS start
 	var sheetRec bytes.Buffer
-	sheetRec.Write(le32(0))
-	sheetRec.Write(le32(1))
-	sheetRec.Write(encStr("rId1"))
-	sheetRec.Write(encStr("Sheet1"))
-	writeRec(&wb, 0x019C, sheetRec.Bytes())
-	writeRec(&wb, 0x0190, nil) // SHEETS end
-	writeRec(&wb, 0x0184, nil) // WORKBOOK end
+	sheetRec.Write(biff12Le32(0))
+	sheetRec.Write(biff12Le32(1))
+	sheetRec.Write(biff12EncStr("rId1"))
+	sheetRec.Write(biff12EncStr("Sheet1"))
+	biff12WriteRec(&wb, 0x019C, sheetRec.Bytes())
+	biff12WriteRec(&wb, 0x0190, nil) // SHEETS end
+	biff12WriteRec(&wb, 0x0184, nil) // WORKBOOK end
 
 	// minimal worksheet
 	var ws bytes.Buffer
-	writeRec(&ws, 0x0181, nil)
-	writeRec(&ws, 0x0191, nil)
-	writeRec(&ws, 0x0192, nil)
-	writeRec(&ws, 0x0182, nil)
+	biff12WriteRec(&ws, 0x0181, nil)
+	biff12WriteRec(&ws, 0x0191, nil)
+	biff12WriteRec(&ws, 0x0192, nil)
+	biff12WriteRec(&ws, 0x0182, nil)
 
 	var zipBuf bytes.Buffer
 	zw := zip.NewWriter(&zipBuf)
-	addFile := func(name string, data []byte) {
-		t.Helper()
-		f, err := zw.Create(name)
-		if err != nil {
-			t.Fatalf("zip create %s: %v", name, err)
-		}
-		if _, err := f.Write(data); err != nil {
-			t.Fatalf("zip write %s: %v", name, err)
-		}
-	}
 	relsXML := `<?xml version="1.0" encoding="UTF-8"?>` +
 		`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
 		`<Relationship Id="rId1" Type="worksheet" Target="worksheets/sheet1.bin"/>` +
 		`</Relationships>`
-	addFile("xl/_rels/workbook.bin.rels", []byte(relsXML))
-	addFile("xl/workbook.bin", wb.Bytes())
-	addFile("xl/worksheets/sheet1.bin", ws.Bytes())
+	zipAddFile(t, zw, "xl/_rels/workbook.bin.rels", []byte(relsXML))
+	zipAddFile(t, zw, "xl/workbook.bin", wb.Bytes())
+	zipAddFile(t, zw, "xl/worksheets/sheet1.bin", ws.Bytes())
 	if err := zw.Close(); err != nil {
 		t.Fatalf("zip close: %v", err)
 	}
@@ -1648,120 +1365,69 @@ func TestWorkbookDate1904(t *testing.T) {
 func buildErrCellXLSB(t *testing.T, errCode byte) []byte {
 	t.Helper()
 
-	writeID := func(buf *bytes.Buffer, id int) {
-		if id < 0x80 {
-			buf.WriteByte(byte(id))
-		} else {
-			buf.WriteByte(byte(id & 0xFF))
-			buf.WriteByte(byte(id >> 8))
-		}
-	}
-	writeLen := func(buf *bytes.Buffer, n int) {
-		for {
-			b := n & 0x7F
-			n >>= 7
-			if n > 0 {
-				buf.WriteByte(byte(b) | 0x80)
-			} else {
-				buf.WriteByte(byte(b))
-				break
-			}
-		}
-	}
-	writeRec := func(buf *bytes.Buffer, id int, payload []byte) {
-		writeID(buf, id)
-		writeLen(buf, len(payload))
-		buf.Write(payload)
-	}
-	encStr := func(s string) []byte {
-		runes := []rune(s)
-		var sb bytes.Buffer
-		_ = binary.Write(&sb, binary.LittleEndian, uint32(len(runes)))
-		for _, r := range runes {
-			_ = binary.Write(&sb, binary.LittleEndian, uint16(r))
-		}
-		return sb.Bytes()
-	}
-	le32 := func(v uint32) []byte {
-		b := make([]byte, 4)
-		binary.LittleEndian.PutUint32(b, v)
-		return b
-	}
-
 	// ── xl/workbook.bin ───────────────────────────────────────────────────────
 
 	var wb bytes.Buffer
-	writeRec(&wb, 0x0183, nil) // WORKBOOK start
-	writeRec(&wb, 0x018F, nil) // SHEETS start
+	biff12WriteRec(&wb, 0x0183, nil) // WORKBOOK start
+	biff12WriteRec(&wb, 0x018F, nil) // SHEETS start
 
 	var sheetRec bytes.Buffer
-	sheetRec.Write(le32(0))            // state flags (visible)
-	sheetRec.Write(le32(1))            // sheetId
-	sheetRec.Write(encStr("rId1"))     // relId
-	sheetRec.Write(encStr("ErrSheet")) // name
-	writeRec(&wb, 0x019C, sheetRec.Bytes())
+	sheetRec.Write(biff12Le32(0))            // state flags (visible)
+	sheetRec.Write(biff12Le32(1))            // sheetId
+	sheetRec.Write(biff12EncStr("rId1"))     // relId
+	sheetRec.Write(biff12EncStr("ErrSheet")) // name
+	biff12WriteRec(&wb, 0x019C, sheetRec.Bytes())
 
-	writeRec(&wb, 0x0190, nil) // SHEETS end
-	writeRec(&wb, 0x0184, nil) // WORKBOOK end
+	biff12WriteRec(&wb, 0x0190, nil) // SHEETS end
+	biff12WriteRec(&wb, 0x0184, nil) // WORKBOOK end
 
 	// ── xl/worksheets/sheet1.bin ──────────────────────────────────────────────
 
 	var ws bytes.Buffer
-	writeRec(&ws, 0x0181, nil) // WORKSHEET start
+	biff12WriteRec(&ws, 0x0181, nil) // WORKSHEET start
 
 	// DIMENSION: r1=0, r2=0, c1=0, c2=1
 	var dimPay bytes.Buffer
-	dimPay.Write(le32(0))
-	dimPay.Write(le32(0))
-	dimPay.Write(le32(0))
-	dimPay.Write(le32(1))
-	writeRec(&ws, 0x0194, dimPay.Bytes())
+	dimPay.Write(biff12Le32(0))
+	dimPay.Write(biff12Le32(0))
+	dimPay.Write(biff12Le32(0))
+	dimPay.Write(biff12Le32(1))
+	biff12WriteRec(&ws, 0x0194, dimPay.Bytes())
 
-	writeRec(&ws, 0x0191, nil) // SHEETDATA start
+	biff12WriteRec(&ws, 0x0191, nil) // SHEETDATA start
 
 	// ROW r=0
-	writeRec(&ws, 0x0000, le32(0))
+	biff12WriteRec(&ws, 0x0000, biff12Le32(0))
 
 	// BoolErr cell at col 0: col(4) + style(4) + errCode(1)
 	var boolErrPay bytes.Buffer
-	boolErrPay.Write(le32(0)) // col 0
-	boolErrPay.Write(le32(0)) // style 0
+	boolErrPay.Write(biff12Le32(0)) // col 0
+	boolErrPay.Write(biff12Le32(0)) // style 0
 	boolErrPay.WriteByte(errCode)
-	writeRec(&ws, 0x0003, boolErrPay.Bytes()) // BoolErr = 0x0003
+	biff12WriteRec(&ws, 0x0003, boolErrPay.Bytes()) // BoolErr = 0x0003
 
 	// FormulaBoolErr cell at col 1: col(4) + style(4) + errCode(1)
 	var formulaErrPay bytes.Buffer
-	formulaErrPay.Write(le32(1)) // col 1
-	formulaErrPay.Write(le32(0)) // style 0
+	formulaErrPay.Write(biff12Le32(1)) // col 1
+	formulaErrPay.Write(biff12Le32(0)) // style 0
 	formulaErrPay.WriteByte(errCode)
-	writeRec(&ws, 0x000B, formulaErrPay.Bytes()) // FormulaBoolErr = 0x000B
+	biff12WriteRec(&ws, 0x000B, formulaErrPay.Bytes()) // FormulaBoolErr = 0x000B
 
-	writeRec(&ws, 0x0192, nil) // SHEETDATA end
-	writeRec(&ws, 0x0182, nil) // WORKSHEET end
+	biff12WriteRec(&ws, 0x0192, nil) // SHEETDATA end
+	biff12WriteRec(&ws, 0x0182, nil) // WORKSHEET end
 
 	// ── assemble ZIP ─────────────────────────────────────────────────────────
 
 	var zipBuf bytes.Buffer
 	zw := zip.NewWriter(&zipBuf)
 
-	addFile := func(name string, data []byte) {
-		t.Helper()
-		f, err := zw.Create(name)
-		if err != nil {
-			t.Fatalf("zip create %s: %v", name, err)
-		}
-		if _, err := f.Write(data); err != nil {
-			t.Fatalf("zip write %s: %v", name, err)
-		}
-	}
-
 	relsXML := `<?xml version="1.0" encoding="UTF-8"?>` +
 		`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
 		`<Relationship Id="rId1" Type="worksheet" Target="worksheets/sheet1.bin"/>` +
 		`</Relationships>`
-	addFile("xl/_rels/workbook.bin.rels", []byte(relsXML))
-	addFile("xl/workbook.bin", wb.Bytes())
-	addFile("xl/worksheets/sheet1.bin", ws.Bytes())
+	zipAddFile(t, zw, "xl/_rels/workbook.bin.rels", []byte(relsXML))
+	zipAddFile(t, zw, "xl/workbook.bin", wb.Bytes())
+	zipAddFile(t, zw, "xl/worksheets/sheet1.bin", ws.Bytes())
 
 	if err := zw.Close(); err != nil {
 		t.Fatalf("zip close: %v", err)
@@ -1833,46 +1499,6 @@ func TestErrorCellStrings(t *testing.T) {
 func buildVisibilityXLSB(t *testing.T) []byte {
 	t.Helper()
 
-	writeID := func(buf *bytes.Buffer, id int) {
-		if id < 0x80 {
-			buf.WriteByte(byte(id))
-		} else {
-			buf.WriteByte(byte(id & 0xFF))
-			buf.WriteByte(byte(id >> 8))
-		}
-	}
-	writeLen := func(buf *bytes.Buffer, n int) {
-		for {
-			b := n & 0x7F
-			n >>= 7
-			if n > 0 {
-				buf.WriteByte(byte(b) | 0x80)
-			} else {
-				buf.WriteByte(byte(b))
-				break
-			}
-		}
-	}
-	writeRec := func(buf *bytes.Buffer, id int, payload []byte) {
-		writeID(buf, id)
-		writeLen(buf, len(payload))
-		buf.Write(payload)
-	}
-	encStr := func(s string) []byte {
-		runes := []rune(s)
-		var sb bytes.Buffer
-		_ = binary.Write(&sb, binary.LittleEndian, uint32(len(runes)))
-		for _, r := range runes {
-			_ = binary.Write(&sb, binary.LittleEndian, uint16(r))
-		}
-		return sb.Bytes()
-	}
-	le32 := func(v uint32) []byte {
-		b := make([]byte, 4)
-		binary.LittleEndian.PutUint32(b, v)
-		return b
-	}
-
 	// ── xl/workbook.bin ───────────────────────────────────────────────────────
 
 	type sheetDef struct {
@@ -1888,28 +1514,28 @@ func buildVisibilityXLSB(t *testing.T) []byte {
 	}
 
 	var wb bytes.Buffer
-	writeRec(&wb, 0x0183, nil) // WORKBOOK start
-	writeRec(&wb, 0x018F, nil) // SHEETS start
+	biff12WriteRec(&wb, 0x0183, nil) // WORKBOOK start
+	biff12WriteRec(&wb, 0x018F, nil) // SHEETS start
 
 	for _, s := range sheets {
 		var sheetRec bytes.Buffer
-		sheetRec.Write(le32(s.hsState)) // flags: low 2 bits = hsState
-		sheetRec.Write(le32(s.sheetID)) // sheetId
-		sheetRec.Write(encStr(s.relID)) // relId
-		sheetRec.Write(encStr(s.name))  // name
-		writeRec(&wb, 0x019C, sheetRec.Bytes())
+		sheetRec.Write(biff12Le32(s.hsState)) // flags: low 2 bits = hsState
+		sheetRec.Write(biff12Le32(s.sheetID)) // sheetId
+		sheetRec.Write(biff12EncStr(s.relID)) // relId
+		sheetRec.Write(biff12EncStr(s.name))  // name
+		biff12WriteRec(&wb, 0x019C, sheetRec.Bytes())
 	}
 
-	writeRec(&wb, 0x0190, nil) // SHEETS end
-	writeRec(&wb, 0x0184, nil) // WORKBOOK end
+	biff12WriteRec(&wb, 0x0190, nil) // SHEETS end
+	biff12WriteRec(&wb, 0x0184, nil) // WORKBOOK end
 
 	// ── minimal worksheet binary (reused for all three sheets) ────────────────
 
 	var ws bytes.Buffer
-	writeRec(&ws, 0x0181, nil) // WORKSHEET start
-	writeRec(&ws, 0x0191, nil) // SHEETDATA start
-	writeRec(&ws, 0x0192, nil) // SHEETDATA end
-	writeRec(&ws, 0x0182, nil) // WORKSHEET end
+	biff12WriteRec(&ws, 0x0181, nil) // WORKSHEET start
+	biff12WriteRec(&ws, 0x0191, nil) // SHEETDATA start
+	biff12WriteRec(&ws, 0x0192, nil) // SHEETDATA end
+	biff12WriteRec(&ws, 0x0182, nil) // WORKSHEET end
 	wsBytes := ws.Bytes()
 
 	// ── assemble ZIP ─────────────────────────────────────────────────────────
@@ -1917,28 +1543,17 @@ func buildVisibilityXLSB(t *testing.T) []byte {
 	var zipBuf bytes.Buffer
 	zw := zip.NewWriter(&zipBuf)
 
-	addFile := func(name string, data []byte) {
-		t.Helper()
-		f, err := zw.Create(name)
-		if err != nil {
-			t.Fatalf("zip create %s: %v", name, err)
-		}
-		if _, err := f.Write(data); err != nil {
-			t.Fatalf("zip write %s: %v", name, err)
-		}
-	}
-
 	relsXML := `<?xml version="1.0" encoding="UTF-8"?>` +
 		`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
 		`<Relationship Id="rId1" Type="worksheet" Target="worksheets/sheet1.bin"/>` +
 		`<Relationship Id="rId2" Type="worksheet" Target="worksheets/sheet2.bin"/>` +
 		`<Relationship Id="rId3" Type="worksheet" Target="worksheets/sheet3.bin"/>` +
 		`</Relationships>`
-	addFile("xl/_rels/workbook.bin.rels", []byte(relsXML))
-	addFile("xl/workbook.bin", wb.Bytes())
-	addFile("xl/worksheets/sheet1.bin", wsBytes)
-	addFile("xl/worksheets/sheet2.bin", wsBytes)
-	addFile("xl/worksheets/sheet3.bin", wsBytes)
+	zipAddFile(t, zw, "xl/_rels/workbook.bin.rels", []byte(relsXML))
+	zipAddFile(t, zw, "xl/workbook.bin", wb.Bytes())
+	zipAddFile(t, zw, "xl/worksheets/sheet1.bin", wsBytes)
+	zipAddFile(t, zw, "xl/worksheets/sheet2.bin", wsBytes)
+	zipAddFile(t, zw, "xl/worksheets/sheet3.bin", wsBytes)
 
 	if err := zw.Close(); err != nil {
 		t.Fatalf("zip close: %v", err)

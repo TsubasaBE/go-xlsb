@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Style handling (`styles` package): parse `styles.bin` to resolve per-cell number
   format IDs; built-in format IDs 5–8, 14, 20–22, 27–36, 37–44, 47, 50–58 are now
   correctly mapped, including CJK locale fallback date formats.
-- Sheet visibility: `Worksheet.IsHidden()` and `Workbook.HiddenSheets()` methods.
+- Sheet visibility: `Workbook.SheetVisible(name)` and `Workbook.SheetVisibility(name)` methods.
 - Workbook date-system detection: `date1904` flag propagated through all date/time
   rendering paths so the 1904 date system is handled correctly.
 - Cell error string mapping: Excel error codes (`#NULL!`, `#DIV/0!`, etc.) are now
