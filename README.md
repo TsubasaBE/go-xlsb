@@ -40,7 +40,7 @@ Workbook features not yet read: defined names, external references, data connect
 
 Password-protected files are not supported.
 
-Number format gaps: scientific notation (`0.00E+00`), fraction formats (`# ?/?`), and accounting alignment.
+Number format gaps: accounting alignment (column-fill `*` and alignment `_` tokens produce a single character rather than actual column padding).
 
 ## Usage
 
@@ -180,7 +180,7 @@ type XFStyle struct {
 }
 ```
 
-`styles.BuiltInNumFmt` is a `map[int]string` of canonical format strings for built-in IDs (0–49) as defined by ECMA-376 §18.8.30.
+`styles.BuiltInNumFmt` is a `map[int]string` of canonical format strings for built-in IDs (0–58) as defined by ECMA-376 §18.8.30.
 
 ## Cell formatting
 
