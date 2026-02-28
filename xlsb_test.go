@@ -844,7 +844,7 @@ func TestIsDateFormat(t *testing.T) {
 		{name: "built-in 15", id: 15, want: true},
 		{name: "built-in 16", id: 16, want: true},
 		{name: "built-in 17", id: 17, want: true},
-		{name: "built-in 22 (m/d/yy h:mm)", id: 22, want: true},
+		{name: "built-in 22 (m/d/yy hh:mm)", id: 22, want: true},
 		{name: "built-in 27", id: 27, want: true},
 		{name: "built-in 36", id: 36, want: true},
 		{name: "built-in 45", id: 45, want: true},
@@ -2314,7 +2314,7 @@ func TestBuiltInNumFmtIDs(t *testing.T) {
 		{43, `_(* #,##0.00_);_(* (#,##0.00);_(* "-"??_);_(@_)`},
 		{44, `_($* #,##0.00_);_($* (#,##0.00);_($* "-"??_);_(@_)`},
 		// IDs fixed in Batch 1
-		{22, "m/d/yy h:mm"},
+		{22, "m/d/yy hh:mm"},
 		{37, `(#,##0_);(#,##0)`},
 		{38, `(#,##0_);[Red](#,##0)`},
 		{39, `(#,##0.00_);(#,##0.00)`},
