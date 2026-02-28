@@ -69,6 +69,11 @@ type Cell struct {
 	//   - float64      — numeric value, date serial, or formula-float result
 	//   - bool         — boolean value
 	V any
+	// Style is the 0-based index into the workbook's cell-format (XF) table.
+	// It is 0 for cells whose record carried no explicit style or for empty
+	// padding cells emitted in dense (sparse=false) mode.
+	// Use Worksheet.IsDateCell(cell.Style) to test whether the format is a date.
+	Style int
 }
 
 // Worksheet holds parsed metadata and provides row iteration for one sheet.
@@ -93,16 +98,20 @@ type Worksheet struct {
 	hasSheetData bool                     // true once SHEETDATA record was found
 	stringTable  *stringtable.StringTable // may be nil
 	rels         map[string]string        // relationship ID → URL (may be nil)
+	dateXFs      map[int]bool             // XF indices that represent date/time formats; may be nil
 }
 
 // New parses the pre-loaded binary data and optional rels XML for a worksheet.
 // stringTable may be nil if the workbook has no shared strings.
-func New(name string, data []byte, relsData []byte, st *stringtable.StringTable) (*Worksheet, error) {
+// dateXFs maps XF indices to true when the corresponding number format is a
+// date/time format; it may be nil when styles information is unavailable.
+func New(name string, data []byte, relsData []byte, st *stringtable.StringTable, dateXFs map[int]bool) (*Worksheet, error) {
 	ws := &Worksheet{
 		Name:        name,
 		Hyperlinks:  make(map[[2]int]string),
 		data:        data,
 		stringTable: st,
+		dateXFs:     dateXFs,
 	}
 	if len(relsData) > 0 {
 		rels, err := parseRelsXML(relsData)
@@ -114,6 +123,14 @@ func New(name string, data []byte, relsData []byte, st *stringtable.StringTable)
 		return nil, err
 	}
 	return ws, nil
+}
+
+// IsDateCell reports whether the given XF style index maps to a date or
+// datetime number format according to the workbook's styles.
+// It returns false when styles information is unavailable or the index is
+// not in the date-format set.
+func (ws *Worksheet) IsDateCell(style int) bool {
+	return ws.dateXFs[style] // nil map returns false safely
 }
 
 // Rows iterates over the worksheet rows in order, calling yield for each one.
@@ -149,6 +166,9 @@ func (ws *Worksheet) Rows(sparse bool) func(yield func([]Cell) bool) {
 		// anchor cell's V.  Populated when the anchor row is emitted and
 		// consulted for every subsequent non-anchor row inside the merge.
 		anchorValues := make(map[[2]int]any)
+		// anchorStyles caches the Style index of the anchor cell, propagated
+		// in parallel with anchorValues.
+		anchorStyles := make(map[[2]int]int)
 
 		// applyMerges fills nil cells that fall inside a merge area with the
 		// anchor value cached for that merge.  It also caches anchor values
@@ -159,20 +179,24 @@ func (ws *Worksheet) Rows(sparse bool) func(yield func([]Cell) bool) {
 					continue
 				}
 				if r == ma.R {
-					// Anchor row: cache the value so non-anchor rows can use it.
-					anchorValues[[2]int{ma.R, ma.C}] = cells[ma.C].V
+					// Anchor row: cache value and style so non-anchor rows can use them.
+					key := [2]int{ma.R, ma.C}
+					anchorValues[key] = cells[ma.C].V
+					anchorStyles[key] = cells[ma.C].Style
 				} else if r > ma.R && r < ma.R+ma.H {
-					// Non-anchor row inside the merge: propagate anchor value.
+					// Non-anchor row inside the merge: propagate anchor value and style.
 					// Only fill columns within the merge width.
 					key := [2]int{ma.R, ma.C}
 					v, ok := anchorValues[key]
 					if !ok {
 						continue
 					}
+					s := anchorStyles[key]
 					for dc := range ma.W {
 						col := ma.C + dc
 						if col < len(cells) && cells[col].V == nil {
 							cells[col].V = v
+							cells[col].Style = s
 						}
 					}
 				}
@@ -226,7 +250,7 @@ func (ws *Worksheet) Rows(sparse bool) func(yield func([]Cell) bool) {
 					continue
 				}
 				if c.C >= 0 && c.C < len(row) {
-					row[c.C] = Cell{R: rowNum, C: c.C, V: c.V}
+					row[c.C] = Cell{R: rowNum, C: c.C, V: c.V, Style: c.Style}
 				}
 
 			case recID == biff12.SheetDataEnd:
@@ -452,8 +476,9 @@ func parseRowRecord(data []byte) (int, error) {
 
 // internalCell is used only during parsing.
 type internalCell struct {
-	C int
-	V any
+	C     int
+	V     any
+	Style int
 }
 
 // parseCellRecord decodes a cell record (BLANK, NUM, BOOLERR, BOOL, FLOAT,
@@ -470,8 +495,15 @@ func parseCellRecord(data []byte, recID int, st *stringtable.StringTable) (inter
 	if err != nil {
 		return internalCell{}, err
 	}
-	if _, err := rr.ReadUint32(); err != nil { // style — not exposed at this level
+	styleRaw, err := rr.ReadUint32()
+	if err != nil {
 		return internalCell{C: int(col)}, nil
+	}
+	// Guard: cap to MaxInt32 so int(styleRaw) is identical on 32- and 64-bit.
+	const maxStyleIndex = 0x7FFFFFFF
+	style := int(styleRaw)
+	if styleRaw > maxStyleIndex {
+		style = 0
 	}
 
 	var v any
@@ -540,7 +572,7 @@ func parseCellRecord(data []byte, recID int, st *stringtable.StringTable) (inter
 		// biff12.Blank: v remains nil
 	}
 
-	return internalCell{C: int(col), V: v}, nil
+	return internalCell{C: int(col), V: v, Style: style}, nil
 }
 
 // parseMergeCellRecord decodes a MERGE_CELL record.

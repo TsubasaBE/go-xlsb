@@ -4,6 +4,7 @@ package workbook
 import (
 	"archive/zip"
 	"bytes"
+	"encoding/binary"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -28,6 +29,12 @@ type Workbook struct {
 	zf          *zip.Reader     // always non-nil
 	sheets      []sheetEntry
 	stringTable *stringtable.StringTable
+	dateXFs     map[int]bool // XF indices whose numFmtId is a date/time format
+	// Date1904 is true when the workbook uses the 1904 date system (base
+	// date 1904-01-01, serial 0 = 1904-01-01). Most workbooks use the
+	// default 1900 system (Date1904 == false). Pass this value to
+	// ConvertDateEx when converting numeric cell values to time.Time.
+	Date1904 bool
 }
 
 // Open opens the named .xlsb file and parses its workbook metadata.
@@ -103,12 +110,15 @@ func (wb *Workbook) Close() error {
 
 // ── internal ─────────────────────────────────────────────────────────────────
 
-// parse reads workbook.bin and sharedStrings.bin (if present).
+// parse reads workbook.bin, sharedStrings.bin (if present), and styles.bin.
 func (wb *Workbook) parse() error {
 	if err := wb.parseWorkbook(); err != nil {
 		return err
 	}
 	if err := wb.parseSharedStrings(); err != nil {
+		return err
+	}
+	if err := wb.parseStyles(); err != nil {
 		return err
 	}
 	return nil
@@ -139,14 +149,23 @@ func (wb *Workbook) parseWorkbook() error {
 			return fmt.Errorf("workbook: %w", err)
 		}
 
-		if recID == biff12.Sheet {
+		switch recID {
+		case biff12.WorkbookPr:
+			// BrtWbProp payload (MS-XLSB §2.4.822): first uint32 is a flags field.
+			// Bit 3 (0x08) is f1904DateSystem — set when the workbook uses the
+			// 1904 date system (base date 1904-01-01, serial 0 = 1904-01-01).
+			if len(recData) >= 4 {
+				flags := binary.LittleEndian.Uint32(recData[:4])
+				wb.Date1904 = (flags & 0x08) != 0
+			}
+		case biff12.Sheet:
 			entry, err := parseSheetRecord(recData, rels)
 			if err != nil {
 				return fmt.Errorf("workbook: parse SHEET record: %w", err)
 			}
 			wb.sheets = append(wb.sheets, entry)
-		} else if recID == biff12.SheetsEnd {
-			break
+		case biff12.SheetsEnd:
+			return nil
 		}
 	}
 	return nil
@@ -165,6 +184,140 @@ func (wb *Workbook) parseSharedStrings() error {
 	}
 	wb.stringTable = st
 	return nil
+}
+
+// parseStyles reads xl/styles.bin and builds the dateXFs set.
+// Failures are silently ignored so that workbooks without styles.bin
+// (or with malformed styles) still open correctly — date detection
+// will simply return false for all cells.
+func (wb *Workbook) parseStyles() error {
+	data, err := wb.readZipEntry("xl/styles.bin")
+	if err != nil {
+		return nil // optional
+	}
+	dateXFs, err := parseDateXFs(data)
+	if err != nil {
+		return nil // degrade gracefully
+	}
+	wb.dateXFs = dateXFs
+	return nil
+}
+
+// parseDateXFs parses the BIFF12 styles stream and returns a set of XF
+// indices (0-based, into the CellXfs table) that correspond to date or
+// datetime number formats.
+//
+// BrtFmt record layout (MS-XLSB §2.4.697):
+//
+//	numFmtId  uint16
+//	stFmtCode ReadString (4-byte char-count + UTF-16LE)
+//
+// BrtXF record layout (MS-XLSB §2.4.674) — we only read the first two fields:
+//
+//	ixfe      uint16   (parent XF index; ignored)
+//	numFmtId  uint16
+//	...       (remaining fields ignored)
+func parseDateXFs(data []byte) (map[int]bool, error) {
+	// fmts maps numFmtId → format string for custom formats (id >= 164).
+	fmts := make(map[int]string)
+	// result maps xfIndex → true for date/time XFs in the CellXfs section.
+	result := make(map[int]bool)
+
+	rdr := record.NewReader(bytes.NewReader(data))
+	inCellXfs := false
+	xfIndex := 0
+
+	for {
+		recID, recData, err := rdr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("workbook: styles: %w", err)
+		}
+
+		switch recID {
+		case biff12.NumFmt:
+			// BrtFmt: numFmtId(uint16) + format string
+			if len(recData) < 2 {
+				continue
+			}
+			fmtID := int(binary.LittleEndian.Uint16(recData[:2]))
+			rr := record.NewRecordReader(recData[2:])
+			fmtStr, _ := rr.ReadString() // ignore error — use empty string
+			fmts[fmtID] = fmtStr
+
+		case biff12.CellXfs:
+			inCellXfs = true
+			xfIndex = 0
+
+		case biff12.CellXfsEnd:
+			inCellXfs = false
+
+		case biff12.Xf:
+			if !inCellXfs {
+				continue // skip style-XF entries in CellStyleXfs
+			}
+			// BrtXF: ixfe(uint16) + numFmtId(uint16) + ...
+			if len(recData) < 4 {
+				xfIndex++
+				continue
+			}
+			// ixfe is at bytes 0–1; numFmtId is at bytes 2–3.
+			numFmtID := int(binary.LittleEndian.Uint16(recData[2:4]))
+			fmtStr := fmts[numFmtID] // empty string for built-in IDs
+			if isDateFormatID(numFmtID, fmtStr) {
+				result[xfIndex] = true
+			}
+			xfIndex++
+		}
+	}
+	return result, nil
+}
+
+// isDateFormatID is the internal counterpart of xlsb.IsDateFormat.
+// It is duplicated here to keep workbook free of an import cycle against the
+// root xlsb package.  Both functions must stay in sync.
+func isDateFormatID(id int, formatStr string) bool {
+	switch {
+	case id >= 14 && id <= 17:
+		return true
+	case id == 22:
+		return true
+	case id >= 27 && id <= 36:
+		return true
+	case id >= 45 && id <= 47:
+		return true
+	case id >= 50 && id <= 58:
+		return true
+	}
+	if id < 164 {
+		return false
+	}
+	inDoubleQuote := false
+	inBracket := false
+	for _, ch := range formatStr {
+		switch {
+		case inDoubleQuote:
+			if ch == '"' {
+				inDoubleQuote = false
+			}
+		case inBracket:
+			if ch == ']' {
+				inBracket = false
+			}
+		case ch == '"':
+			inDoubleQuote = true
+		case ch == '[':
+			inBracket = true
+		case ch == 'd' || ch == 'D' ||
+			ch == 'm' || ch == 'M' ||
+			ch == 'y' || ch == 'Y' ||
+			ch == 'h' || ch == 'H':
+			return true
+		}
+	}
+	return false
 }
 
 // openSheet reads the binary data for the given sheet entry and returns a
@@ -191,7 +344,7 @@ func (wb *Workbook) openSheet(entry sheetEntry) (*worksheet.Worksheet, error) {
 	relsPath := zipPath[:lastSlash+1] + "_rels/" + zipPath[lastSlash+1:] + ".rels"
 	relsData, _ := wb.readZipEntry(relsPath) // ignore error — it's optional
 
-	return worksheet.New(entry.name, data, relsData, wb.stringTable)
+	return worksheet.New(entry.name, data, relsData, wb.stringTable, wb.dateXFs)
 }
 
 // readZipEntry reads the full contents of a named entry from the ZIP archive.

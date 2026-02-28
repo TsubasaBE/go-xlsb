@@ -20,12 +20,16 @@
 //
 // # Dates
 //
-// Excel stores dates as floating-point serial numbers.  Use [ConvertDate] to
-// turn such a value into a [time.Time]:
+// Excel stores dates as floating-point serial numbers.  Use [ConvertDateEx] to
+// turn such a value into a [time.Time], passing wb.Date1904 so the correct
+// date system is used:
 //
-//	if f, ok := cell.V.(float64); ok {
-//	    t, err := xlsb.ConvertDate(f)
+//	if f, ok := cell.V.(float64); ok && sheet.IsDateCell(cell.Style) {
+//	    t, err := xlsb.ConvertDateEx(f, wb.Date1904)
 //	}
+//
+// [ConvertDate] is a convenience wrapper for the common 1900 date system
+// (Date1904 == false).
 package xlsb
 
 import (
@@ -103,4 +107,106 @@ func ConvertDate(date float64) (time.Time, error) {
 		t = base.Add(time.Duration(intPart)*24*time.Hour + time.Duration(fracSec)*time.Second)
 	}
 	return t, nil
+}
+
+// ConvertDateEx converts an Excel date serial number to a [time.Time] value,
+// respecting the workbook's date system.
+//
+// Pass wb.Date1904 as the date1904 argument. When date1904 is false the
+// function is identical to [ConvertDate] (1900 date system). When date1904 is
+// true the workbook uses the 1904 date system:
+//   - Serial 0 corresponds to 1904-01-01.
+//   - Serials increase by one day per unit, with no phantom leap-day
+//     correction (the Lotus 1-2-3 bug does not apply to the 1904 system).
+func ConvertDateEx(date float64, date1904 bool) (time.Time, error) {
+	if !date1904 {
+		return ConvertDate(date)
+	}
+	if math.IsNaN(date) || math.IsInf(date, 0) {
+		return time.Time{}, fmt.Errorf("xlsb: ConvertDateEx: invalid value %v", date)
+	}
+	if date < 0 {
+		return time.Time{}, fmt.Errorf("xlsb: ConvertDateEx: negative serial %v not supported", date)
+	}
+	// In the 1904 system the maximum representable date is the same calendar
+	// day as in the 1900 system.  Serial 0 = 1904-01-01, so the 1904 serials
+	// are offset by 1462 days from the 1900 serials (4 years including one
+	// leap year, 1904 itself).  The maximum 1900 serial is 2,958,465
+	// (9999-12-31); subtracting 1462 gives the 1904-system maximum.
+	const maxSerial = 2_958_466 - 1462
+	if date > maxSerial {
+		return time.Time{}, fmt.Errorf("xlsb: ConvertDateEx: serial %v exceeds maximum supported value %d", date, maxSerial)
+	}
+
+	// Base: 1904-01-01. Serial 0 = 1904-01-01, serial 1 = 1904-01-02, etc.
+	// No phantom leap-day correction is needed for the 1904 date system.
+	base := time.Date(1904, 1, 1, 0, 0, 0, 0, time.UTC)
+	intPart := int(date)
+	fracSec := int64(math.Round((date - math.Trunc(date)) * 24 * 60 * 60))
+	if fracSec < 0 {
+		fracSec = 0
+	} else if fracSec > 86399 {
+		fracSec = 86399
+	}
+
+	t := base.Add(time.Duration(intPart)*24*time.Hour + time.Duration(fracSec)*time.Second)
+	return t, nil
+}
+
+// IsDateFormat reports whether a number-format ID (and optional custom format
+// string) represents a date or datetime format.
+//
+// id is the numFmtId stored in the XF record.  For built-in formats (id < 164)
+// formatStr is ignored; for custom formats (id >= 164) formatStr must be the
+// format string read from the BrtFmt record in xl/styles.bin.
+//
+// Built-in date/time IDs follow ECMA-376 §18.8.30:
+//
+//	14–17, 22, 27–36, 45–47, 50–58
+//
+// For custom formats the function scans the unquoted portion of formatStr for
+// any of the characters d, D, m, M, y, Y, h, H.  Sections enclosed in double
+// quotes or square brackets are skipped.
+func IsDateFormat(id int, formatStr string) bool {
+	// Built-in date/time numFmtIds.
+	switch {
+	case id >= 14 && id <= 17:
+		return true
+	case id == 22:
+		return true
+	case id >= 27 && id <= 36:
+		return true
+	case id >= 45 && id <= 47:
+		return true
+	case id >= 50 && id <= 58:
+		return true
+	}
+	if id < 164 {
+		return false // other built-in IDs are not dates
+	}
+	// Custom format: scan unquoted characters for date/time tokens.
+	inDoubleQuote := false
+	inBracket := false
+	for _, ch := range formatStr {
+		switch {
+		case inDoubleQuote:
+			if ch == '"' {
+				inDoubleQuote = false
+			}
+		case inBracket:
+			if ch == ']' {
+				inBracket = false
+			}
+		case ch == '"':
+			inDoubleQuote = true
+		case ch == '[':
+			inBracket = true
+		case ch == 'd' || ch == 'D' ||
+			ch == 'm' || ch == 'M' ||
+			ch == 'y' || ch == 'Y' ||
+			ch == 'h' || ch == 'H':
+			return true
+		}
+	}
+	return false
 }

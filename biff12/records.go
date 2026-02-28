@@ -300,6 +300,10 @@ const (
 	// (ECMA-376 §2.4.181, record ID 0x002B).
 	Font = 0x002B
 
+	// NumFmt records a single number-format entry (numFmtId + format string)
+	// in the styles part (MS-XLSB §2.4.697 / ECMA-376 §2.4.497, record ID 0x002C).
+	NumFmt = 0x002C
+
 	// Fill records a single fill (pattern or gradient) definition
 	// (ECMA-376 §2.4.167, record ID 0x002D).
 	Fill = 0x002D
@@ -371,6 +375,14 @@ const (
 	// BordersEnd marks the end of the borders collection
 	// (ECMA-376 §2.4.26, record ID 0x04E6).
 	BordersEnd = 0x04E6
+
+	// NumFmts marks the start of the number-formats collection in the styles part
+	// (MS-XLSB §2.4.698 / ECMA-376 §2.4.498, record ID 0x02C6).
+	NumFmts = 0x02C6
+
+	// NumFmtsEnd marks the end of the number-formats collection
+	// (MS-XLSB §2.4.699 / ECMA-376 §2.4.499, record ID 0x02C8).
+	NumFmtsEnd = 0x02C8
 
 	// CellXfs marks the start of the cell-XF collection (applied cell formats)
 	// (ECMA-376 §2.4.48, record ID 0x04E9).

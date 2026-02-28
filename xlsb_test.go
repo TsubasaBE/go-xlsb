@@ -585,3 +585,629 @@ func TestRecordReaderUnicode(t *testing.T) {
 // Compile-time check: the top-level xlsb package is importable and ConvertDate
 // is accessible.
 var _ = xlsb.ConvertDate
+
+// ── IsDateFormat ──────────────────────────────────────────────────────────────
+
+func TestIsDateFormat(t *testing.T) {
+	tests := []struct {
+		name      string
+		id        int
+		formatStr string
+		want      bool
+	}{
+		// ── built-in date IDs ─────────────────────────────────────────────────
+		{name: "built-in 14 (m/d/yy)", id: 14, want: true},
+		{name: "built-in 15", id: 15, want: true},
+		{name: "built-in 16", id: 16, want: true},
+		{name: "built-in 17", id: 17, want: true},
+		{name: "built-in 22 (m/d/yy h:mm)", id: 22, want: true},
+		{name: "built-in 27", id: 27, want: true},
+		{name: "built-in 36", id: 36, want: true},
+		{name: "built-in 45", id: 45, want: true},
+		{name: "built-in 46", id: 46, want: true},
+		{name: "built-in 47", id: 47, want: true},
+		{name: "built-in 50", id: 50, want: true},
+		{name: "built-in 58", id: 58, want: true},
+		// ── built-in non-date IDs ─────────────────────────────────────────────
+		{name: "built-in 0 (General)", id: 0, want: false},
+		{name: "built-in 1 (0)", id: 1, want: false},
+		{name: "built-in 4 (0.00)", id: 4, want: false},
+		{name: "built-in 11 (0.00E+00)", id: 11, want: false},
+		{name: "built-in 49 (@)", id: 49, want: false},
+		{name: "boundary 13", id: 13, want: false},
+		{name: "boundary 18", id: 18, want: false},
+		{name: "boundary 23", id: 23, want: false},
+		{name: "boundary 163", id: 163, want: false},
+		// ── custom format IDs (>= 164) ────────────────────────────────────────
+		{name: "custom yyyy-mm-dd", id: 164, formatStr: "yyyy-mm-dd", want: true},
+		{name: "custom dd/mm/yyyy hh:mm", id: 165, formatStr: "dd/mm/yyyy hh:mm", want: true},
+		{name: "custom numeric 0.00", id: 166, formatStr: "0.00", want: false},
+		{name: "custom text @", id: 167, formatStr: "@", want: false},
+		// d inside double quotes must not trigger
+		{name: "custom quoted d", id: 168, formatStr: `"date"0.00`, want: false},
+		// y inside square brackets (locale) must not trigger
+		{name: "custom bracketed y", id: 169, formatStr: `[$-409]0.00`, want: false},
+		// uppercase variants
+		{name: "custom YYYY", id: 170, formatStr: "YYYY", want: true},
+		{name: "custom MM", id: 171, formatStr: "MM", want: true},
+		{name: "custom DD", id: 172, formatStr: "DD", want: true},
+		{name: "custom HH", id: 173, formatStr: "HH:MM", want: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := xlsb.IsDateFormat(tc.id, tc.formatStr)
+			if got != tc.want {
+				t.Errorf("IsDateFormat(%d, %q) = %v, want %v", tc.id, tc.formatStr, got, tc.want)
+			}
+		})
+	}
+}
+
+// ── Cell.Style ────────────────────────────────────────────────────────────────
+
+// buildMinimalXLSBWithStyle is like buildMinimalXLSB but writes style=wantStyle
+// into the FLOAT cell at column 0 so we can verify Cell.Style is populated.
+func buildMinimalXLSBWithStyle(t *testing.T, wantStyle uint32) []byte {
+	t.Helper()
+
+	writeID := func(buf *bytes.Buffer, id int) {
+		if id < 0x80 {
+			buf.WriteByte(byte(id))
+		} else {
+			buf.WriteByte(byte(id & 0xFF))
+			buf.WriteByte(byte(id >> 8))
+		}
+	}
+	writeLen := func(buf *bytes.Buffer, n int) {
+		for {
+			b := n & 0x7F
+			n >>= 7
+			if n > 0 {
+				buf.WriteByte(byte(b) | 0x80)
+			} else {
+				buf.WriteByte(byte(b))
+				break
+			}
+		}
+	}
+	writeRec := func(buf *bytes.Buffer, id int, payload []byte) {
+		writeID(buf, id)
+		writeLen(buf, len(payload))
+		buf.Write(payload)
+	}
+	encStr := func(s string) []byte {
+		runes := []rune(s)
+		var sb bytes.Buffer
+		_ = binary.Write(&sb, binary.LittleEndian, uint32(len(runes)))
+		for _, r := range runes {
+			_ = binary.Write(&sb, binary.LittleEndian, uint16(r))
+		}
+		return sb.Bytes()
+	}
+	le32 := func(v uint32) []byte {
+		b := make([]byte, 4)
+		binary.LittleEndian.PutUint32(b, v)
+		return b
+	}
+
+	// xl/workbook.bin
+	var wb bytes.Buffer
+	writeRec(&wb, 0x0183, nil)
+	writeRec(&wb, 0x018F, nil)
+	var sheetRec bytes.Buffer
+	sheetRec.Write(le32(0))
+	sheetRec.Write(le32(1))
+	sheetRec.Write(encStr("rId1"))
+	sheetRec.Write(encStr("Sheet1"))
+	writeRec(&wb, 0x019C, sheetRec.Bytes())
+	writeRec(&wb, 0x0190, nil)
+	writeRec(&wb, 0x0184, nil)
+
+	// xl/worksheets/sheet1.bin  — FLOAT cell at col 0 with the requested style
+	var ws bytes.Buffer
+	writeRec(&ws, 0x0181, nil)
+	var dimPay bytes.Buffer
+	dimPay.Write(le32(0))
+	dimPay.Write(le32(0))
+	dimPay.Write(le32(0))
+	dimPay.Write(le32(0))
+	writeRec(&ws, 0x0194, dimPay.Bytes())
+	writeRec(&ws, 0x0191, nil)
+	writeRec(&ws, 0x0000, le32(0))
+	var floatCell bytes.Buffer
+	floatCell.Write(le32(0))         // col
+	floatCell.Write(le32(wantStyle)) // style
+	var f64buf [8]byte
+	binary.LittleEndian.PutUint64(f64buf[:], 0x4045000000000000) // 42.0
+	floatCell.Write(f64buf[:])
+	writeRec(&ws, 0x0005, floatCell.Bytes())
+	writeRec(&ws, 0x0192, nil)
+	writeRec(&ws, 0x0182, nil)
+
+	var zipBuf bytes.Buffer
+	zw := zip.NewWriter(&zipBuf)
+	addFile := func(name string, data []byte) {
+		t.Helper()
+		f, err := zw.Create(name)
+		if err != nil {
+			t.Fatalf("zip create %s: %v", name, err)
+		}
+		if _, err := f.Write(data); err != nil {
+			t.Fatalf("zip write %s: %v", name, err)
+		}
+	}
+	relsXML := `<?xml version="1.0" encoding="UTF-8"?>` +
+		`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+		`<Relationship Id="rId1" Type="worksheet" Target="worksheets/sheet1.bin"/>` +
+		`</Relationships>`
+	addFile("xl/_rels/workbook.bin.rels", []byte(relsXML))
+	addFile("xl/workbook.bin", wb.Bytes())
+	addFile("xl/worksheets/sheet1.bin", ws.Bytes())
+	if err := zw.Close(); err != nil {
+		t.Fatalf("zip close: %v", err)
+	}
+	return zipBuf.Bytes()
+}
+
+func TestCellStyleIndex(t *testing.T) {
+	const wantStyle = uint32(7)
+	data := buildMinimalXLSBWithStyle(t, wantStyle)
+	wb, err := workbook.OpenReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatalf("OpenReader: %v", err)
+	}
+	defer wb.Close()
+
+	sheet, err := wb.Sheet(1)
+	if err != nil {
+		t.Fatalf("Sheet(1): %v", err)
+	}
+
+	var found bool
+	for row := range sheet.Rows(true) {
+		for _, cell := range row {
+			if cell.C == 0 {
+				found = true
+				if cell.Style != int(wantStyle) {
+					t.Errorf("cell.Style = %d, want %d", cell.Style, wantStyle)
+				}
+			}
+		}
+	}
+	if !found {
+		t.Error("did not find any cell at column 0")
+	}
+}
+
+// ── IsDateCell ────────────────────────────────────────────────────────────────
+
+// buildStylesBin constructs a minimal xl/styles.bin BIFF12 stream containing:
+//   - One BrtFmt record: id=164, format="yyyy-mm-dd"
+//   - CellXfs section with three BrtXF records:
+//     xf[0]: numFmtId=14  (built-in date)   → IsDateCell(0) == true
+//     xf[1]: numFmtId=164 (custom date)     → IsDateCell(1) == true
+//     xf[2]: numFmtId=0   (General/normal)  → IsDateCell(2) == false
+func buildStylesBin(t *testing.T) []byte {
+	t.Helper()
+
+	writeID := func(buf *bytes.Buffer, id int) {
+		if id < 0x80 {
+			buf.WriteByte(byte(id))
+		} else {
+			buf.WriteByte(byte(id & 0xFF))
+			buf.WriteByte(byte(id >> 8))
+		}
+	}
+	writeLen := func(buf *bytes.Buffer, n int) {
+		for {
+			b := n & 0x7F
+			n >>= 7
+			if n > 0 {
+				buf.WriteByte(byte(b) | 0x80)
+			} else {
+				buf.WriteByte(byte(b))
+				break
+			}
+		}
+	}
+	writeRec := func(buf *bytes.Buffer, id int, payload []byte) {
+		writeID(buf, id)
+		writeLen(buf, len(payload))
+		buf.Write(payload)
+	}
+	le16 := func(v uint16) []byte {
+		b := make([]byte, 2)
+		binary.LittleEndian.PutUint16(b, v)
+		return b
+	}
+	encStr := func(s string) []byte {
+		runes := []rune(s)
+		var sb bytes.Buffer
+		_ = binary.Write(&sb, binary.LittleEndian, uint32(len(runes)))
+		for _, r := range runes {
+			_ = binary.Write(&sb, binary.LittleEndian, uint16(r))
+		}
+		return sb.Bytes()
+	}
+	// BrtXF payload: ixfe(2) + numFmtId(2) + fontId(2) + fillId(2) + borderId(2) + flags(4)
+	// We only need the first four bytes correct; the rest can be zeros.
+	makeXF := func(numFmtID uint16) []byte {
+		var p bytes.Buffer
+		p.Write(le16(0))         // ixfe
+		p.Write(le16(numFmtID))  // numFmtId
+		p.Write(make([]byte, 8)) // fontId + fillId + borderId + flags (zeros)
+		return p.Bytes()
+	}
+
+	var buf bytes.Buffer
+
+	// StyleSheet start (0x0296)
+	writeRec(&buf, 0x0296, nil)
+
+	// BrtFmt record: numFmtId=164 + "yyyy-mm-dd"
+	var fmtPay bytes.Buffer
+	fmtPay.Write(le16(164))
+	fmtPay.Write(encStr("yyyy-mm-dd"))
+	writeRec(&buf, 0x002C, fmtPay.Bytes())
+
+	// CellXfs start (0x04E9)
+	writeRec(&buf, 0x04E9, nil)
+	// xf[0]: numFmtId=14 (built-in date)
+	writeRec(&buf, 0x002F, makeXF(14))
+	// xf[1]: numFmtId=164 (custom date)
+	writeRec(&buf, 0x002F, makeXF(164))
+	// xf[2]: numFmtId=0 (General)
+	writeRec(&buf, 0x002F, makeXF(0))
+	// CellXfs end (0x04EA)
+	writeRec(&buf, 0x04EA, nil)
+
+	// StyleSheet end (0x0297)
+	writeRec(&buf, 0x0297, nil)
+
+	return buf.Bytes()
+}
+
+// buildXLSBWithStylesBin builds a minimal .xlsb ZIP that includes xl/styles.bin.
+func buildXLSBWithStylesBin(t *testing.T) []byte {
+	t.Helper()
+
+	writeID := func(buf *bytes.Buffer, id int) {
+		if id < 0x80 {
+			buf.WriteByte(byte(id))
+		} else {
+			buf.WriteByte(byte(id & 0xFF))
+			buf.WriteByte(byte(id >> 8))
+		}
+	}
+	writeLen := func(buf *bytes.Buffer, n int) {
+		for {
+			b := n & 0x7F
+			n >>= 7
+			if n > 0 {
+				buf.WriteByte(byte(b) | 0x80)
+			} else {
+				buf.WriteByte(byte(b))
+				break
+			}
+		}
+	}
+	writeRec := func(buf *bytes.Buffer, id int, payload []byte) {
+		writeID(buf, id)
+		writeLen(buf, len(payload))
+		buf.Write(payload)
+	}
+	encStr := func(s string) []byte {
+		runes := []rune(s)
+		var sb bytes.Buffer
+		_ = binary.Write(&sb, binary.LittleEndian, uint32(len(runes)))
+		for _, r := range runes {
+			_ = binary.Write(&sb, binary.LittleEndian, uint16(r))
+		}
+		return sb.Bytes()
+	}
+	le32 := func(v uint32) []byte {
+		b := make([]byte, 4)
+		binary.LittleEndian.PutUint32(b, v)
+		return b
+	}
+
+	// xl/workbook.bin
+	var wb bytes.Buffer
+	writeRec(&wb, 0x0183, nil)
+	writeRec(&wb, 0x018F, nil)
+	var sheetRec bytes.Buffer
+	sheetRec.Write(le32(0))
+	sheetRec.Write(le32(1))
+	sheetRec.Write(encStr("rId1"))
+	sheetRec.Write(encStr("Sheet1"))
+	writeRec(&wb, 0x019C, sheetRec.Bytes())
+	writeRec(&wb, 0x0190, nil)
+	writeRec(&wb, 0x0184, nil)
+
+	// xl/worksheets/sheet1.bin — minimal, no cells needed
+	var ws bytes.Buffer
+	writeRec(&ws, 0x0181, nil)
+	writeRec(&ws, 0x0191, nil)
+	writeRec(&ws, 0x0192, nil)
+	writeRec(&ws, 0x0182, nil)
+
+	var zipBuf bytes.Buffer
+	zw := zip.NewWriter(&zipBuf)
+	addFile := func(name string, data []byte) {
+		t.Helper()
+		f, err := zw.Create(name)
+		if err != nil {
+			t.Fatalf("zip create %s: %v", name, err)
+		}
+		if _, err := f.Write(data); err != nil {
+			t.Fatalf("zip write %s: %v", name, err)
+		}
+	}
+	relsXML := `<?xml version="1.0" encoding="UTF-8"?>` +
+		`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+		`<Relationship Id="rId1" Type="worksheet" Target="worksheets/sheet1.bin"/>` +
+		`</Relationships>`
+	addFile("xl/_rels/workbook.bin.rels", []byte(relsXML))
+	addFile("xl/workbook.bin", wb.Bytes())
+	addFile("xl/styles.bin", buildStylesBin(t))
+	addFile("xl/worksheets/sheet1.bin", ws.Bytes())
+	if err := zw.Close(); err != nil {
+		t.Fatalf("zip close: %v", err)
+	}
+	return zipBuf.Bytes()
+}
+
+func TestIsDateCell(t *testing.T) {
+	data := buildXLSBWithStylesBin(t)
+	wb, err := workbook.OpenReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatalf("OpenReader: %v", err)
+	}
+	defer wb.Close()
+
+	sheet, err := wb.Sheet(1)
+	if err != nil {
+		t.Fatalf("Sheet(1): %v", err)
+	}
+
+	tests := []struct {
+		style int
+		want  bool
+		desc  string
+	}{
+		{0, true, "xf[0] numFmtId=14 (built-in date)"},
+		{1, true, "xf[1] numFmtId=164 custom yyyy-mm-dd"},
+		{2, false, "xf[2] numFmtId=0 (General)"},
+		{99, false, "out-of-range style returns false"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.desc, func(t *testing.T) {
+			got := sheet.IsDateCell(tc.style)
+			if got != tc.want {
+				t.Errorf("IsDateCell(%d) = %v, want %v", tc.style, got, tc.want)
+			}
+		})
+	}
+}
+
+// ── Date1904 ──────────────────────────────────────────────────────────────────
+
+// buildMinimalXLSBWithDate1904 builds a minimal .xlsb whose workbook.bin
+// optionally contains a BrtWbProp record (id=0x0199) with the f1904DateSystem
+// bit (bit 3 = 0x08) set or cleared.
+func buildMinimalXLSBWithDate1904(t *testing.T, date1904 bool) []byte {
+	t.Helper()
+
+	writeID := func(buf *bytes.Buffer, id int) {
+		if id < 0x80 {
+			buf.WriteByte(byte(id))
+		} else {
+			buf.WriteByte(byte(id & 0xFF))
+			buf.WriteByte(byte(id >> 8))
+		}
+	}
+	writeLen := func(buf *bytes.Buffer, n int) {
+		for {
+			b := n & 0x7F
+			n >>= 7
+			if n > 0 {
+				buf.WriteByte(byte(b) | 0x80)
+			} else {
+				buf.WriteByte(byte(b))
+				break
+			}
+		}
+	}
+	writeRec := func(buf *bytes.Buffer, id int, payload []byte) {
+		writeID(buf, id)
+		writeLen(buf, len(payload))
+		buf.Write(payload)
+	}
+	encStr := func(s string) []byte {
+		runes := []rune(s)
+		var sb bytes.Buffer
+		_ = binary.Write(&sb, binary.LittleEndian, uint32(len(runes)))
+		for _, r := range runes {
+			_ = binary.Write(&sb, binary.LittleEndian, uint16(r))
+		}
+		return sb.Bytes()
+	}
+	le32 := func(v uint32) []byte {
+		b := make([]byte, 4)
+		binary.LittleEndian.PutUint32(b, v)
+		return b
+	}
+
+	var wb bytes.Buffer
+	writeRec(&wb, 0x0183, nil) // WORKBOOK start
+
+	// BrtWbProp (0x0199): flags uint32; bit 3 = f1904DateSystem
+	var flags uint32
+	if date1904 {
+		flags = 0x08
+	}
+	writeRec(&wb, 0x0199, le32(flags))
+
+	writeRec(&wb, 0x018F, nil) // SHEETS start
+	var sheetRec bytes.Buffer
+	sheetRec.Write(le32(0))
+	sheetRec.Write(le32(1))
+	sheetRec.Write(encStr("rId1"))
+	sheetRec.Write(encStr("Sheet1"))
+	writeRec(&wb, 0x019C, sheetRec.Bytes())
+	writeRec(&wb, 0x0190, nil) // SHEETS end
+	writeRec(&wb, 0x0184, nil) // WORKBOOK end
+
+	// minimal worksheet
+	var ws bytes.Buffer
+	writeRec(&ws, 0x0181, nil)
+	writeRec(&ws, 0x0191, nil)
+	writeRec(&ws, 0x0192, nil)
+	writeRec(&ws, 0x0182, nil)
+
+	var zipBuf bytes.Buffer
+	zw := zip.NewWriter(&zipBuf)
+	addFile := func(name string, data []byte) {
+		t.Helper()
+		f, err := zw.Create(name)
+		if err != nil {
+			t.Fatalf("zip create %s: %v", name, err)
+		}
+		if _, err := f.Write(data); err != nil {
+			t.Fatalf("zip write %s: %v", name, err)
+		}
+	}
+	relsXML := `<?xml version="1.0" encoding="UTF-8"?>` +
+		`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+		`<Relationship Id="rId1" Type="worksheet" Target="worksheets/sheet1.bin"/>` +
+		`</Relationships>`
+	addFile("xl/_rels/workbook.bin.rels", []byte(relsXML))
+	addFile("xl/workbook.bin", wb.Bytes())
+	addFile("xl/worksheets/sheet1.bin", ws.Bytes())
+	if err := zw.Close(); err != nil {
+		t.Fatalf("zip close: %v", err)
+	}
+	return zipBuf.Bytes()
+}
+
+func TestWorkbookDate1904(t *testing.T) {
+	tests := []struct {
+		name     string
+		date1904 bool
+		want     bool
+	}{
+		{"flag set (1904 system)", true, true},
+		{"flag clear (1900 system)", false, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			data := buildMinimalXLSBWithDate1904(t, tc.date1904)
+			wb, err := workbook.OpenReader(bytes.NewReader(data), int64(len(data)))
+			if err != nil {
+				t.Fatalf("OpenReader: %v", err)
+			}
+			defer wb.Close()
+			if wb.Date1904 != tc.want {
+				t.Errorf("Date1904 = %v, want %v", wb.Date1904, tc.want)
+			}
+		})
+	}
+}
+
+// ── ConvertDateEx ─────────────────────────────────────────────────────────────
+
+func TestConvertDateEx(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    float64
+		date1904 bool
+		want     time.Time
+		wantErr  bool
+	}{
+		// ── 1900 system (date1904=false): delegates to ConvertDate ────────────
+		{
+			name:     "1900: serial 0 gives 1900-01-01",
+			input:    0,
+			date1904: false,
+			want:     time.Date(1900, 1, 1, 0, 0, 0, 0, time.UTC),
+		},
+		{
+			name:     "1900: pyxlsb example 41235.45578",
+			input:    41235.45578,
+			date1904: false,
+			want:     time.Date(2012, 11, 22, 10, 56, 19, 0, time.UTC),
+		},
+		// ── 1904 system (date1904=true) ───────────────────────────────────────
+		{
+			name:     "1904: serial 0 gives 1904-01-01",
+			input:    0,
+			date1904: true,
+			want:     time.Date(1904, 1, 1, 0, 0, 0, 0, time.UTC),
+		},
+		{
+			name:     "1904: serial 0 with time component",
+			input:    0.5,
+			date1904: true,
+			want:     time.Date(1904, 1, 1, 12, 0, 0, 0, time.UTC),
+		},
+		{
+			name:     "1904: serial 1 gives 1904-01-02",
+			input:    1,
+			date1904: true,
+			want:     time.Date(1904, 1, 2, 0, 0, 0, 0, time.UTC),
+		},
+		{
+			name:     "1904: serial 365 gives 1904-12-31",
+			input:    365,
+			date1904: true,
+			want:     time.Date(1904, 12, 31, 0, 0, 0, 0, time.UTC),
+		},
+		{
+			// 1904-system serial 39813 = 1904-01-01 + 39813 days = 2013-01-01.
+			// Cross-check: 1900-system serial 41275 also = 2013-01-01 (39813 + 1462 = 41275).
+			name:     "1904: serial 39813 gives 2013-01-01",
+			input:    39813,
+			date1904: true,
+			want:     time.Date(2013, 1, 1, 0, 0, 0, 0, time.UTC),
+		},
+		// ── error cases ───────────────────────────────────────────────────────
+		{
+			name:     "1904: NaN returns error",
+			input:    math.NaN(),
+			date1904: true,
+			wantErr:  true,
+		},
+		{
+			name:     "1904: +Inf returns error",
+			input:    math.Inf(1),
+			date1904: true,
+			wantErr:  true,
+		},
+		{
+			name:     "1904: negative serial returns error",
+			input:    -1,
+			date1904: true,
+			wantErr:  true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := xlsb.ConvertDateEx(tc.input, tc.date1904)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil (result=%v)", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !got.Equal(tc.want) {
+				t.Errorf("ConvertDateEx(%v, %v) = %v, want %v", tc.input, tc.date1904, got, tc.want)
+			}
+		})
+	}
+}
