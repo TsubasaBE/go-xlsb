@@ -225,6 +225,10 @@ Both functions handle the Lotus 1-2-3 leap-year bug that Excel carries forward i
 
 This library is a port of [pyxlsb](https://github.com/willtrnr/pyxlsb), written by [William Turner](https://github.com/willtrnr). The BIFF12 parsing logic, shared string table handling, date conversion, and overall design are all derived from his work.
 
+Number format rendering draws heavily on the design and research of the [Excelize](https://github.com/qax-os/excelize) project and team. Their open-source work on Excel format strings, built-in number format tables, date/time token parsing, and display rendering provided essential reference material for the `FormatCell` implementation in this library.
+
+The number format token parser also references the [github.com/xuri/nfp](https://github.com/xuri/nfp) package and its authors. `nfp` (Number Format Parser) underpins Excelize's format handling and its tokenization approach influenced the design of the format parser used here.
+
 ## License
 
 This library is licensed under the [GNU Lesser General Public License v3 or later (LGPL-3.0-or-later)](LICENSE), matching the license of [pyxlsb](https://github.com/willtrnr/pyxlsb) from which it is derived. The full LGPL-3.0 text is in [LICENSE](LICENSE) and the underlying GPL-3.0 text is in [COPYING](COPYING).
