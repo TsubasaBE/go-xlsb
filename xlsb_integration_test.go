@@ -1026,9 +1026,8 @@ func TestCopyConsistencyPlanningMSE3(t *testing.T) {
 // We verify:
 //  1. MergeCells is non-empty (merge records were parsed).
 //  2. At least one merge covers 0-based row 15 (Excel row 16).
-//  3. Non-anchor rows in every vertical merge carry the propagated anchor value —
-//     Rows() fills non-anchor cells with the anchor cell's value so callers see
-//     the same value on every row of the merged region.
+//  3. Non-anchor cells in every vertical merge return nil — Rows() does NOT
+//     propagate the anchor value into satellite rows, matching excelize behaviour.
 func TestPlanningMSE12CPGMergeCells(t *testing.T) {
 	wb := openXLSB(t, "planning_MSE12.xlsb")
 	sheet, err := wb.SheetByName("CPG")
@@ -1056,8 +1055,8 @@ func TestPlanningMSE12CPGMergeCells(t *testing.T) {
 	}
 
 	// 3. For every vertical merge (H > 1) within the first 20 rows, verify
-	// that non-anchor rows carry the same value as the anchor cell —
-	// Rows() propagates the anchor value into non-anchor rows.
+	// that non-anchor rows return nil — the binary format stores a value only
+	// in the anchor cell; satellite cells have no record and must remain nil.
 	// Only check merges that start within the first 20 rows (for speed).
 	rows := make(map[int][]worksheet.Cell)
 	rowNum := 0
@@ -1071,16 +1070,8 @@ func TestPlanningMSE12CPGMergeCells(t *testing.T) {
 
 	for _, ma := range sheet.MergeCells {
 		if ma.R >= 20 || ma.H <= 1 {
-			continue // only vertical merges need row propagation
+			continue // only vertical merges have non-anchor rows
 		}
-		anchorRow, ok := rows[ma.R]
-		if !ok {
-			continue // anchor row was empty (sparse), nothing to check
-		}
-		if ma.C >= len(anchorRow) {
-			continue
-		}
-		anchorVal := anchorRow[ma.C].V
 		for dr := 1; dr < ma.H && ma.R+dr < 20; dr++ {
 			nonAnchorRow, ok := rows[ma.R+dr]
 			if !ok {
@@ -1090,9 +1081,9 @@ func TestPlanningMSE12CPGMergeCells(t *testing.T) {
 				continue
 			}
 			got := nonAnchorRow[ma.C].V
-			if got != anchorVal {
-				t.Errorf("non-anchor cell row=%d col=%d in merge (R=%d C=%d H=%d W=%d): got %v, want propagated anchor value %v",
-					ma.R+dr, ma.C, ma.R, ma.C, ma.H, ma.W, got, anchorVal)
+			if got != nil {
+				t.Errorf("non-anchor cell row=%d col=%d in merge (R=%d C=%d H=%d W=%d): got %v (%T), want nil",
+					ma.R+dr, ma.C, ma.R, ma.C, ma.H, ma.W, got, got)
 			}
 		}
 	}
@@ -1152,13 +1143,12 @@ func TestPlanningMSE12CPGRow16MergedValue(t *testing.T) {
 	}
 }
 
-// TestPlanningMSE12CPGGradeRows verifies that the vertical merge spanning
-// Excel rows 17–19 (0-based rows 16–18) in column A of the CPG sheet causes
-// all three rows to carry the value "Grade" after merge propagation.
+// TestPlanningMSE12CPGGradeRows verifies the vertical merge spanning Excel rows
+// 17–19 (0-based rows 16–18) in column A of the CPG sheet.
 //
-// In BIFF12, only the anchor cell (row 16, col 0) stores the value; the two
-// non-anchor rows below it are blank in the binary.  Rows() must propagate the
-// anchor value so callers see "Grade" on every row of the merged region.
+// In BIFF12, only the anchor cell (row 16, col 0) stores the value "Grade";
+// the two satellite rows below it have no cell record.  Rows() must return nil
+// for satellite cells, matching excelize behaviour — values are NOT propagated.
 func TestPlanningMSE12CPGGradeRows(t *testing.T) {
 	wb := openXLSB(t, "planning_MSE12.xlsb")
 	sheet, err := wb.SheetByName("CPG")
@@ -1185,23 +1175,41 @@ func TestPlanningMSE12CPGGradeRows(t *testing.T) {
 		rowNum++
 	}
 
-	for r := anchorRow; r <= lastRow; r++ {
-		row, ok := collected[r]
+	tests := []struct {
+		row     int
+		wantStr string // non-empty → expect this string value
+		wantNil bool   // true → expect nil
+	}{
+		{anchorRow, "Grade", false}, // anchor: must carry "Grade"
+		{anchorRow + 1, "", true},   // satellite row 17: must be nil
+		{anchorRow + 2, "", true},   // satellite row 18: must be nil
+	}
+
+	for _, tc := range tests {
+		row, ok := collected[tc.row]
 		if !ok {
-			t.Errorf("0-based row %d (Excel row %d) not found in sparse iteration", r, r+1)
+			t.Errorf("0-based row %d (Excel row %d) not found in sparse iteration", tc.row, tc.row+1)
 			continue
 		}
 		if len(row) == 0 {
-			t.Errorf("0-based row %d (Excel row %d): row is empty", r, r+1)
+			t.Errorf("0-based row %d (Excel row %d): row is empty", tc.row, tc.row+1)
 			continue
 		}
-		v, ok := row[0].V.(string)
-		if !ok {
-			t.Errorf("0-based row %d (Excel row %d) col A: type=%T, want string", r, r+1, row[0].V)
-			continue
-		}
-		if v != "Grade" {
-			t.Errorf("0-based row %d (Excel row %d) col A = %q, want %q", r, r+1, v, "Grade")
+		got := row[0].V
+		if tc.wantNil {
+			if got != nil {
+				t.Errorf("0-based row %d (Excel row %d) col A = %v (%T), want nil (satellite cell)",
+					tc.row, tc.row+1, got, got)
+			}
+		} else {
+			v, ok := got.(string)
+			if !ok {
+				t.Errorf("0-based row %d (Excel row %d) col A: type=%T, want string", tc.row, tc.row+1, got)
+				continue
+			}
+			if v != tc.wantStr {
+				t.Errorf("0-based row %d (Excel row %d) col A = %q, want %q", tc.row, tc.row+1, v, tc.wantStr)
+			}
 		}
 	}
 }

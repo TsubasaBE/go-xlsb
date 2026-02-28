@@ -30,6 +30,13 @@
 //
 // [ConvertDate] is a convenience wrapper for the common 1900 date system
 // (Date1904 == false).
+//
+// # Format detection
+//
+// [IsDateFormat] checks whether a number-format ID (and optional custom format
+// string) represents a date or datetime format.  It is a lower-level helper for
+// callers that build their own cell-rendering logic without going through
+// [worksheet.Worksheet.IsDateCell].
 package xlsb
 
 import (

@@ -583,6 +583,246 @@ func TestRecordReaderUnicode(t *testing.T) {
 	}
 }
 
+// ── MergeCell satellite values ────────────────────────────────────────────────
+
+// buildMergeXLSB constructs an in-memory .xlsb with two merge regions:
+//
+//   - Vertical merge A1:A3 (rows 0–2, col 0) — anchor value "Grade"
+//   - Horizontal merge A5:C5 (row 4, cols 0–2) — anchor value "Header"
+//
+// Only the anchor cell record is written for each region; satellite cells have
+// no record, matching the actual .xlsb on-disk layout.
+func buildMergeXLSB(t *testing.T) []byte {
+	t.Helper()
+
+	writeID := func(buf *bytes.Buffer, id int) {
+		if id < 0x80 {
+			buf.WriteByte(byte(id))
+		} else {
+			buf.WriteByte(byte(id & 0xFF))
+			buf.WriteByte(byte(id >> 8))
+		}
+	}
+	writeLen := func(buf *bytes.Buffer, n int) {
+		for {
+			b := n & 0x7F
+			n >>= 7
+			if n > 0 {
+				buf.WriteByte(byte(b) | 0x80)
+			} else {
+				buf.WriteByte(byte(b))
+				break
+			}
+		}
+	}
+	writeRec := func(buf *bytes.Buffer, id int, payload []byte) {
+		writeID(buf, id)
+		writeLen(buf, len(payload))
+		buf.Write(payload)
+	}
+	encStr := func(s string) []byte {
+		runes := []rune(s)
+		var sb bytes.Buffer
+		_ = binary.Write(&sb, binary.LittleEndian, uint32(len(runes)))
+		for _, r := range runes {
+			_ = binary.Write(&sb, binary.LittleEndian, uint16(r))
+		}
+		return sb.Bytes()
+	}
+	le32 := func(v uint32) []byte {
+		b := make([]byte, 4)
+		binary.LittleEndian.PutUint32(b, v)
+		return b
+	}
+	// mergeRec encodes a MERGE_CELL record: r1, r2, c1, c2 (all uint32).
+	mergeRec := func(r1, r2, c1, c2 uint32) []byte {
+		var p bytes.Buffer
+		p.Write(le32(r1))
+		p.Write(le32(r2))
+		p.Write(le32(c1))
+		p.Write(le32(c2))
+		return p.Bytes()
+	}
+	// formulaStringCell encodes a FormulaString cell: col(4)+style(4)+string.
+	formulaStringCell := func(col uint32, s string) []byte {
+		var p bytes.Buffer
+		p.Write(le32(col))
+		p.Write(le32(0)) // style
+		p.Write(encStr(s))
+		return p.Bytes()
+	}
+
+	// ── xl/workbook.bin ───────────────────────────────────────────────────────
+
+	var wb bytes.Buffer
+	writeRec(&wb, 0x0183, nil) // WORKBOOK start
+	writeRec(&wb, 0x018F, nil) // SHEETS start
+	var sheetRec bytes.Buffer
+	sheetRec.Write(le32(0))
+	sheetRec.Write(le32(1))
+	sheetRec.Write(encStr("rId1"))
+	sheetRec.Write(encStr("MergeSheet"))
+	writeRec(&wb, 0x019C, sheetRec.Bytes())
+	writeRec(&wb, 0x0190, nil) // SHEETS end
+	writeRec(&wb, 0x0184, nil) // WORKBOOK end
+
+	// ── xl/worksheets/sheet1.bin ──────────────────────────────────────────────
+
+	var ws bytes.Buffer
+	writeRec(&ws, 0x0181, nil) // WORKSHEET start
+
+	// DIMENSION: rows 0–4, cols 0–2
+	var dimPay bytes.Buffer
+	dimPay.Write(le32(0)) // r1
+	dimPay.Write(le32(4)) // r2
+	dimPay.Write(le32(0)) // c1
+	dimPay.Write(le32(2)) // c2
+	writeRec(&ws, 0x0194, dimPay.Bytes())
+
+	writeRec(&ws, 0x0191, nil) // SHEETDATA start
+
+	// Row 0: anchor of vertical merge — FormulaString "Grade" at col 0
+	writeRec(&ws, 0x0000, le32(0))
+	writeRec(&ws, 0x0008, formulaStringCell(0, "Grade")) // FormulaString = 0x0008
+
+	// Row 1: satellite of vertical merge — no cell records written
+	writeRec(&ws, 0x0000, le32(1))
+
+	// Row 2: satellite of vertical merge — no cell records written
+	writeRec(&ws, 0x0000, le32(2))
+
+	// Row 4: anchor of horizontal merge — FormulaString "Header" at col 0
+	writeRec(&ws, 0x0000, le32(4))
+	writeRec(&ws, 0x0008, formulaStringCell(0, "Header")) // FormulaString = 0x0008
+
+	writeRec(&ws, 0x0192, nil) // SHEETDATA end
+
+	// MERGE_CELL records (appear after SHEETDATA in the stream)
+	// Vertical merge: A1:A3 → rows 0–2, col 0
+	writeRec(&ws, 0x00E5, mergeRec(0, 2, 0, 0)) // MergeCell = 0x00E5
+	// Horizontal merge: A5:C5 → row 4, cols 0–2
+	writeRec(&ws, 0x00E5, mergeRec(4, 4, 0, 2))
+
+	writeRec(&ws, 0x0182, nil) // WORKSHEET end
+
+	// ── assemble ZIP ─────────────────────────────────────────────────────────
+
+	var zipBuf bytes.Buffer
+	zw := zip.NewWriter(&zipBuf)
+	addFile := func(name string, data []byte) {
+		t.Helper()
+		f, err := zw.Create(name)
+		if err != nil {
+			t.Fatalf("zip create %s: %v", name, err)
+		}
+		if _, err := f.Write(data); err != nil {
+			t.Fatalf("zip write %s: %v", name, err)
+		}
+	}
+	relsXML := `<?xml version="1.0" encoding="UTF-8"?>` +
+		`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+		`<Relationship Id="rId1" Type="worksheet" Target="worksheets/sheet1.bin"/>` +
+		`</Relationships>`
+	addFile("xl/_rels/workbook.bin.rels", []byte(relsXML))
+	addFile("xl/workbook.bin", wb.Bytes())
+	addFile("xl/worksheets/sheet1.bin", ws.Bytes())
+	if err := zw.Close(); err != nil {
+		t.Fatalf("zip close: %v", err)
+	}
+	return zipBuf.Bytes()
+}
+
+// TestWorksheetVerticalMergeSatellitesEmpty verifies that satellite cells in a
+// vertical merge region return nil — not the anchor cell's value — matching the
+// behaviour of excelize's GetRows.  This is a regression test for the bug where
+// go-xlsb was incorrectly propagating the anchor value into non-anchor rows.
+func TestWorksheetVerticalMergeSatellitesEmpty(t *testing.T) {
+	data := buildMergeXLSB(t)
+	wb, err := workbook.OpenReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatalf("OpenReader: %v", err)
+	}
+	defer wb.Close()
+
+	sheet, err := wb.Sheet(1)
+	if err != nil {
+		t.Fatalf("Sheet(1): %v", err)
+	}
+
+	// Collect all rows (dense mode so every row index 0–4 is present).
+	rows := make(map[int][]worksheet.Cell)
+	for row := range sheet.Rows(false) {
+		if len(row) > 0 {
+			rows[row[0].R] = row
+		}
+	}
+
+	tests := []struct {
+		name    string
+		rowIdx  int
+		colIdx  int
+		wantVal any
+		desc    string
+	}{
+		// ── vertical merge A1:A3 ─────────────────────────────────────────────
+		{
+			name:   "vertical anchor row 0 col 0",
+			rowIdx: 0, colIdx: 0,
+			wantVal: "Grade",
+			desc:    "anchor cell must carry the value",
+		},
+		{
+			name:   "vertical satellite row 1 col 0",
+			rowIdx: 1, colIdx: 0,
+			wantVal: nil,
+			desc:    "first satellite must be nil, not propagated",
+		},
+		{
+			name:   "vertical satellite row 2 col 0",
+			rowIdx: 2, colIdx: 0,
+			wantVal: nil,
+			desc:    "second satellite must be nil, not propagated",
+		},
+		// ── horizontal merge A5:C5 ───────────────────────────────────────────
+		{
+			name:   "horizontal anchor row 4 col 0",
+			rowIdx: 4, colIdx: 0,
+			wantVal: "Header",
+			desc:    "anchor cell must carry the value",
+		},
+		{
+			name:   "horizontal satellite row 4 col 1",
+			rowIdx: 4, colIdx: 1,
+			wantVal: nil,
+			desc:    "horizontal satellite col 1 must be nil",
+		},
+		{
+			name:   "horizontal satellite row 4 col 2",
+			rowIdx: 4, colIdx: 2,
+			wantVal: nil,
+			desc:    "horizontal satellite col 2 must be nil",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Helper()
+			row, ok := rows[tc.rowIdx]
+			if !ok {
+				t.Fatalf("row %d not found in output", tc.rowIdx)
+			}
+			if tc.colIdx >= len(row) {
+				t.Fatalf("row %d has only %d cells; want col %d", tc.rowIdx, len(row), tc.colIdx)
+			}
+			got := row[tc.colIdx].V
+			if got != tc.wantVal {
+				t.Errorf("%s: cell[%d][%d].V = %v (%T), want %v — %s",
+					tc.name, tc.rowIdx, tc.colIdx, got, got, tc.wantVal, tc.desc)
+			}
+		})
+	}
+}
+
 // Compile-time check: the top-level xlsb package is importable and ConvertDate
 // is accessible.
 var _ = xlsb.ConvertDate

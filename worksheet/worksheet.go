@@ -139,9 +139,11 @@ func (ws *Worksheet) IsDateCell(style int) bool {
 // as slices of nil-valued Cells (matching pyxlsb behaviour).  When sparse is
 // true only rows that contain at least one record are yielded.
 //
-// Merge-cell propagation: for every merged range the anchor cell's value is
-// repeated into all non-anchor cells that share the same column, matching the
-// visual appearance of the merged region in Excel.
+// Merged-cell regions are reflected faithfully from the underlying binary
+// storage: only the anchor cell (top-left of the region) carries a value;
+// all satellite cells — whether in the same row (horizontal merge) or a
+// subsequent row (vertical merge) — return nil, matching the behaviour of
+// excelize's GetRows.
 //
 // Rows uses Go 1.22+ range-over-func semantics.
 func (ws *Worksheet) Rows(sparse bool) func(yield func([]Cell) bool) {
@@ -160,48 +162,6 @@ func (ws *Worksheet) Rows(sparse bool) func(yield func([]Cell) bool) {
 		dim := ws.effectiveDim()
 		rowNum := -1
 		var row []Cell
-
-		// anchorValues caches the cell value stored in the top-left (anchor)
-		// cell of each merge area.  Key is [anchorRow, col]; value is the
-		// anchor cell's V.  Populated when the anchor row is emitted and
-		// consulted for every subsequent non-anchor row inside the merge.
-		anchorValues := make(map[[2]int]any)
-		// anchorStyles caches the Style index of the anchor cell, propagated
-		// in parallel with anchorValues.
-		anchorStyles := make(map[[2]int]int)
-
-		// applyMerges fills nil cells that fall inside a merge area with the
-		// anchor value cached for that merge.  It also caches anchor values
-		// when the anchor row itself is processed.
-		applyMerges := func(r int, cells []Cell) {
-			for _, ma := range ws.MergeCells {
-				if ma.C >= len(cells) {
-					continue
-				}
-				if r == ma.R {
-					// Anchor row: cache value and style so non-anchor rows can use them.
-					key := [2]int{ma.R, ma.C}
-					anchorValues[key] = cells[ma.C].V
-					anchorStyles[key] = cells[ma.C].Style
-				} else if r > ma.R && r < ma.R+ma.H {
-					// Non-anchor row inside the merge: propagate anchor value and style.
-					// Only fill columns within the merge width.
-					key := [2]int{ma.R, ma.C}
-					v, ok := anchorValues[key]
-					if !ok {
-						continue
-					}
-					s := anchorStyles[key]
-					for dc := range ma.W {
-						col := ma.C + dc
-						if col < len(cells) && cells[col].V == nil {
-							cells[col].V = v
-							cells[col].Style = s
-						}
-					}
-				}
-			}
-		}
 
 		for {
 			recID, recData, err := rdr.Next()
@@ -223,7 +183,6 @@ func (ws *Worksheet) Rows(sparse bool) func(yield func([]Cell) bool) {
 					continue
 				}
 				if row != nil {
-					applyMerges(rowNum, row)
 					if !yield(row) {
 						return
 					}
@@ -231,9 +190,7 @@ func (ws *Worksheet) Rows(sparse bool) func(yield func([]Cell) bool) {
 				if !sparse {
 					for rowNum < r-1 {
 						rowNum++
-						empty := makeEmptyRow(rowNum, dim)
-						applyMerges(rowNum, empty)
-						if !yield(empty) {
+						if !yield(makeEmptyRow(rowNum, dim)) {
 							return
 						}
 					}
@@ -255,14 +212,12 @@ func (ws *Worksheet) Rows(sparse bool) func(yield func([]Cell) bool) {
 
 			case recID == biff12.SheetDataEnd:
 				if row != nil {
-					applyMerges(rowNum, row)
 					yield(row) // caller may have stopped; return either way
 				}
 				return
 			}
 		}
 		if row != nil {
-			applyMerges(rowNum, row)
 			yield(row) // caller may have stopped; nothing to do after this
 		}
 	}
