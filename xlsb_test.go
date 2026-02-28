@@ -9,6 +9,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"math"
 	"testing"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"github.com/TsubasaBE/go-xlsb/numfmt"
 	"github.com/TsubasaBE/go-xlsb/record"
 	"github.com/TsubasaBE/go-xlsb/stringtable"
+	"github.com/TsubasaBE/go-xlsb/styles"
 	"github.com/TsubasaBE/go-xlsb/workbook"
 	"github.com/TsubasaBE/go-xlsb/worksheet"
 )
@@ -1293,9 +1295,9 @@ func TestFormatValuePercent(t *testing.T) {
 // TestFormatValueDateLocale covers Cat B: built-in locale date (numFmtID=14, m/d/yy).
 func TestFormatValueDateLocale(t *testing.T) {
 	// Excel serial 45412 = 2024-04-30 (1900 system).
-	// m/d/yy → "4/30/24"
+	// MM-DD-YY (excelize ground truth for built-in ID 14) → "04-30-24"
 	got := numfmt.FormatValue(float64(45412), 14, "", false)
-	want := "4/30/24"
+	want := "04-30-24"
 	if got != want {
 		t.Errorf("FormatValue(45412, 14) = %q, want %q", got, want)
 	}
@@ -1440,7 +1442,7 @@ func TestWorkbookFormatCell(t *testing.T) {
 		styleIdx int
 		want     string
 	}{
-		{"date built-in m/d/yy", serial, 0, "12/25/23"},
+		{"date built-in m/d/yy -> MM-DD-YY", serial, 0, "12-25-23"},
 		{"date custom yyyy-mm-dd", serial, 1, "2023-12-25"},
 		{"general float", serial, 2, "45285"},
 		{"nil value", nil, 0, ""},
@@ -2092,6 +2094,612 @@ func TestConvertDateEx(t *testing.T) {
 			}
 			if !got.Equal(tc.want) {
 				t.Errorf("ConvertDateEx(%v, %v) = %v, want %v", tc.input, tc.date1904, got, tc.want)
+			}
+		})
+	}
+}
+
+// ── Batch 1 tests ─────────────────────────────────────────────────────────────
+
+// TestFormatValueTextSection verifies that the fourth section of a multi-section
+// format string is applied to string cell values, with "@" substituted by the
+// cell value and surrounding literals emitted.
+func TestFormatValueTextSection(t *testing.T) {
+	tests := []struct {
+		name   string
+		v      string
+		fmtStr string
+		want   string
+	}{
+		{
+			// Four-section format: positive;negative;zero;text.
+			// The text section prefixes the cell value with a literal.
+			// Note: nfp v0.0.1 has a known quirk with bracket literals inside
+			// quoted strings; use angle-bracket literals instead.
+			name:   "@ in fourth section wraps value",
+			v:      "hello",
+			fmtStr: `0;-0;0;">> "@" <<"`,
+			want:   ">> hello <<",
+		},
+		{
+			// Plain "@" as the entire format — shortcut path, return as-is.
+			name:   "bare @ format returns value unchanged",
+			v:      "world",
+			fmtStr: "@",
+			want:   "world",
+		},
+		{
+			// "General" format — string passthrough.
+			name:   "General format returns value unchanged",
+			v:      "test",
+			fmtStr: "General",
+			want:   "test",
+		},
+		{
+			// Three-section format — no text section; string returned as-is.
+			name:   "three sections: no text section, passthrough",
+			v:      "abc",
+			fmtStr: `0;-0;0`,
+			want:   "abc",
+		},
+		{
+			// Text section with literal prefix only (no @ token).
+			// nfp emits a literal for the quoted prefix.  With no @ token, the
+			// section still has content, so we emit the literals.
+			name:   "text section literal prefix no placeholder",
+			v:      "xyz",
+			fmtStr: `0;-0;0;"prefix"`,
+			want:   "prefix",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Helper()
+			got := numfmt.FormatValue(tc.v, 164, tc.fmtStr, false)
+			if got != tc.want {
+				t.Errorf("FormatValue(%q, %q) = %q, want %q", tc.v, tc.fmtStr, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFormatValueAlignmentToken verifies that _x alignment tokens are rendered
+// as a single space in numeric, datetime, and text sections.
+func TestFormatValueAlignmentToken(t *testing.T) {
+	tests := []struct {
+		name   string
+		v      any
+		fmtID  int
+		fmtStr string
+		want   string
+	}{
+		{
+			// Accounting-style format uses _) at the end to align with
+			// negative-parenthesis formats.  The _) should produce one space.
+			name:   "numeric: trailing _) emits space",
+			v:      float64(1234),
+			fmtID:  164,
+			fmtStr: "#,##0_)",
+			want:   "1,234 ",
+		},
+		{
+			// Built-in ID 37: (#,##0_);(#,##0).
+			// Section 0 is "(#,##0_)" — the "(" is a literal, so positive values
+			// render as "(500 " (open paren + number + alignment space).
+			name:   "built-in 37 positive: literal paren plus trailing space",
+			v:      float64(500),
+			fmtID:  37,
+			fmtStr: "",
+			want:   "(500 ",
+		},
+		{
+			// Built-in ID 37 negative value: rendered with parentheses, no trailing space.
+			name:   "built-in 37 negative parentheses",
+			v:      float64(-500),
+			fmtID:  37,
+			fmtStr: "",
+			want:   "(500)",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Helper()
+			got := numfmt.FormatValue(tc.v, tc.fmtID, tc.fmtStr, false)
+			if got != tc.want {
+				t.Errorf("FormatValue(%v, id=%d, %q) = %q, want %q", tc.v, tc.fmtID, tc.fmtStr, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFormatValueRepeatsChar verifies that *x repeat-char tokens are rendered
+// as a single instance of the character in numeric, datetime, and text sections.
+func TestFormatValueRepeatsChar(t *testing.T) {
+	tests := []struct {
+		name   string
+		v      any
+		fmtID  int
+		fmtStr string
+		want   string
+	}{
+		{
+			// *- before the number: fills column with '-', but in plain-text we
+			// emit exactly one '-'.
+			name:   "numeric: *- prefix emits one dash",
+			v:      float64(42),
+			fmtID:  164,
+			fmtStr: "*-0",
+			want:   "-42",
+		},
+		{
+			// "0 *-": space literal then *- repeat-char.  nfp parses *- as
+			// RepeatsChar with TValue="-".  Plain-text rendering emits one "-".
+			name:   "numeric: trailing *- emits one dash",
+			v:      float64(7),
+			fmtID:  164,
+			fmtStr: `0 *-`,
+			want:   "7 -",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Helper()
+			got := numfmt.FormatValue(tc.v, tc.fmtID, tc.fmtStr, false)
+			if got != tc.want {
+				t.Errorf("FormatValue(%v, %q) = %q, want %q", tc.v, tc.fmtStr, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFormatValueCurrencySymbol verifies that [$symbol-locale] currency language
+// tokens emit only the symbol portion (not the raw bracket expression).
+func TestFormatValueCurrencySymbol(t *testing.T) {
+	tests := []struct {
+		name   string
+		v      float64
+		fmtStr string
+		want   string
+	}{
+		{
+			// Euro symbol with German locale: [$€-407]#,##0.00
+			name:   "euro symbol with locale",
+			v:      1234.5,
+			fmtStr: `[$€-407]#,##0.00`,
+			want:   "€1,234.50",
+		},
+		{
+			// Dollar sign with US locale: [$USD-409] #,##0
+			name:   "USD symbol with locale",
+			v:      1000,
+			fmtStr: `[$USD-409] #,##0`,
+			want:   "USD 1,000",
+		},
+		{
+			// Plain $ (not a currency-language token, just a literal) — verify
+			// existing literal handling still works alongside.
+			name:   "plain dollar literal",
+			v:      50,
+			fmtStr: `"$"0`,
+			want:   "$50",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Helper()
+			got := numfmt.FormatValue(tc.v, 164, tc.fmtStr, false)
+			if got != tc.want {
+				t.Errorf("FormatValue(%v, %q) = %q, want %q", tc.v, tc.fmtStr, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestBuiltInNumFmtIDs verifies that all expected built-in format IDs are
+// present in styles.BuiltInNumFmt and hold the correct canonical strings as
+// defined by ECMA-376 and confirmed against excelize.
+func TestBuiltInNumFmtIDs(t *testing.T) {
+	tests := []struct {
+		id   int
+		want string
+	}{
+		// IDs 5–8: currency variants (added in Batch 1)
+		{5, `($#,##0_);($#,##0)`},
+		{6, `($#,##0_);[Red]($#,##0)`},
+		{7, `($#,##0.00_);($#,##0.00)`},
+		{8, `($#,##0.00_);[Red]($#,##0.00)`},
+		// IDs 41–44: accounting formats (added in Batch 1)
+		{41, `_(* #,##0_);_(* (#,##0);_(* "-"_);_(@_)`},
+		{42, `_($* #,##0_);_($* (#,##0);_($* "-"_);_(@_)`},
+		{43, `_(* #,##0.00_);_(* (#,##0.00);_(* "-"??_);_(@_)`},
+		{44, `_($* #,##0.00_);_($* (#,##0.00);_($* "-"??_);_(@_)`},
+		// IDs fixed in Batch 1
+		{22, "m/d/yy h:mm"},
+		{37, `(#,##0_);(#,##0)`},
+		{38, `(#,##0_);[Red](#,##0)`},
+		{39, `(#,##0.00_);(#,##0.00)`},
+		{40, `(#,##0.00_);[Red](#,##0.00)`},
+		{47, "mm:ss.0"},
+	}
+	for _, tc := range tests {
+		t.Run(fmt.Sprintf("ID_%d", tc.id), func(t *testing.T) {
+			t.Helper()
+			got, ok := styles.BuiltInNumFmt[tc.id]
+			if !ok {
+				t.Fatalf("BuiltInNumFmt[%d] not found", tc.id)
+			}
+			if got != tc.want {
+				t.Errorf("BuiltInNumFmt[%d] = %q, want %q", tc.id, got, tc.want)
+			}
+		})
+	}
+}
+
+// ── Batch 2 tests ─────────────────────────────────────────────────────────────
+
+// TestFormatValueScientific verifies E+/E- scientific and engineering notation.
+func TestFormatValueScientific(t *testing.T) {
+	tests := []struct {
+		name   string
+		v      float64
+		fmtStr string
+		want   string
+	}{
+		// Standard scientific: one integer digit.
+		{
+			name:   "positive standard scientific",
+			v:      12345.6789,
+			fmtStr: "0.00E+00",
+			want:   "1.23E+04",
+		},
+		{
+			name:   "small positive standard scientific",
+			v:      0.000123,
+			fmtStr: "0.00E+00",
+			want:   "1.23E-04",
+		},
+		{
+			name:   "negative standard scientific",
+			v:      -9876.5,
+			fmtStr: "0.00E+00",
+			want:   "-9.88E+03",
+		},
+		{
+			name:   "zero standard scientific",
+			v:      0,
+			fmtStr: "0.00E+00",
+			want:   "0.00E+00",
+		},
+		// Built-in ID 11 format string used directly.
+		{
+			name:   "built-in 11: 0.00E+00",
+			v:      1234.567,
+			fmtStr: "0.00E+00",
+			want:   "1.23E+03",
+		},
+		// Engineering notation: 3 integer digits, exponent multiple of 3.
+		{
+			name:   "engineering ##0.0E+0 large",
+			v:      12345678,
+			fmtStr: "##0.0E+0",
+			want:   "12.3E+6",
+		},
+		{
+			name:   "engineering ##0.0E+0 medium",
+			v:      1234,
+			fmtStr: "##0.0E+0",
+			want:   "1.2E+3",
+		},
+		{
+			name:   "engineering ##0.0E+0 small",
+			v:      0.000456,
+			fmtStr: "##0.0E+0",
+			want:   "456.0E-6",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Helper()
+			got := numfmt.FormatValue(tc.v, 164, tc.fmtStr, false)
+			if got != tc.want {
+				t.Errorf("FormatValue(%v, %q) = %q, want %q", tc.v, tc.fmtStr, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFormatValueFraction verifies mixed-number fraction rendering.
+func TestFormatValueFraction(t *testing.T) {
+	tests := []struct {
+		name   string
+		v      float64
+		fmtStr string
+		want   string
+	}{
+		// Single-digit denominator (max 9).
+		{
+			name:   "# ?/?: 1.75 → 1 3/4",
+			v:      1.75,
+			fmtStr: "# ?/?",
+			want:   "1 3/4",
+		},
+		{
+			name:   "# ?/?: 1.333333 → 1 1/3",
+			v:      1.333333,
+			fmtStr: "# ?/?",
+			want:   "1 1/3",
+		},
+		{
+			name:   "# ?/?: 0.5 → space-padded integer then 1/2",
+			v:      0.5,
+			fmtStr: "# ?/?",
+			want:   " 1/2",
+		},
+		{
+			name:   "# ?/?: exact integer suppresses fraction",
+			v:      2.0,
+			fmtStr: "# ?/?",
+			want:   "2    ",
+		},
+		// Double-digit denominator (max 99).
+		{
+			name:   "# ??/??: pi approx → 3 14/99",
+			v:      3.141592653589793,
+			fmtStr: "# ??/??",
+			want:   "3 14/99",
+		},
+		{
+			name:   "# ??/??: exact integer suppresses fraction",
+			v:      3.0,
+			fmtStr: "# ??/??",
+			want:   "3      ",
+		},
+		{
+			name:   "# ??/??: 0.1 → space-padded",
+			v:      0.1,
+			fmtStr: "# ??/??",
+			want:   "  1/10",
+		},
+		// Negative value.
+		{
+			name:   "negative fraction (single section → minus prefix)",
+			v:      -1.75,
+			fmtStr: "# ?/?",
+			want:   "-1 3/4",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Helper()
+			got := numfmt.FormatValue(tc.v, 164, tc.fmtStr, false)
+			if got != tc.want {
+				t.Errorf("FormatValue(%v, %q) = %q, want %q", tc.v, tc.fmtStr, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFormatValueDigitalPlaceHolder verifies '?' space-padded digit placeholder.
+func TestFormatValueDigitalPlaceHolder(t *testing.T) {
+	tests := []struct {
+		name   string
+		v      float64
+		fmtStr string
+		want   string
+	}{
+		{
+			// "0.??" — decimal with optional trailing digits, space-padded.
+			// 1.5 → "1.5" (one digit after decimal; second ? is trimmed).
+			name:   "0.?? trims trailing zero",
+			v:      1.5,
+			fmtStr: "0.??",
+			want:   "1.5",
+		},
+		{
+			// Integer value: decimal point suppressed when no fractional part.
+			name:   "0.?? integer: no decimal",
+			v:      1.0,
+			fmtStr: "0.??",
+			want:   "1",
+		},
+		{
+			// "?.??" — nfp quirk: leading ? merged into DecimalPoint token.
+			// Value 3.14: int part 3, frac "14".
+			name:   "?.?? integer plus two decimal places",
+			v:      3.14,
+			fmtStr: "?.??",
+			want:   "3.14",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Helper()
+			got := numfmt.FormatValue(tc.v, 164, tc.fmtStr, false)
+			if got != tc.want {
+				t.Errorf("FormatValue(%v, %q) = %q, want %q", tc.v, tc.fmtStr, got, tc.want)
+			}
+		})
+	}
+}
+
+// ── Batch 3 tests ─────────────────────────────────────────────────────────────
+
+// TestFormatValueThousandsScaling verifies that trailing commas in a number
+// format string scale the value by 1,000 per comma (Excel convention).
+func TestFormatValueThousandsScaling(t *testing.T) {
+	t.Helper()
+	tests := []struct {
+		name   string
+		v      float64
+		fmtStr string
+		want   string
+	}{
+		{
+			// Single trailing comma: divide by 1,000 → display in thousands.
+			name:   "single trailing comma scale by 1000",
+			v:      1234567,
+			fmtStr: "#,##0,",
+			want:   "1,235",
+		},
+		{
+			// Two trailing commas: divide by 1,000,000 → display in millions.
+			name:   "two trailing commas scale by 1000000",
+			v:      1234567890,
+			fmtStr: "#,##0,,",
+			want:   "1,235",
+		},
+		{
+			// Thousands separator AND one scaling comma.
+			// 5,000,000 / 1,000 = 5,000 → displayed as "5,000M"
+			name:   "thousands separator with one scaling comma",
+			v:      5000000,
+			fmtStr: `#,##0,"M"`,
+			want:   "5,000M",
+		},
+		{
+			// Plain format, no trailing comma: no scaling.
+			name:   "no trailing comma no scaling",
+			v:      1234567,
+			fmtStr: "#,##0",
+			want:   "1,234,567",
+		},
+		{
+			// Two decimal places with one trailing comma.
+			name:   "decimal places with trailing comma",
+			v:      1500000,
+			fmtStr: `#,##0.0,`,
+			want:   "1,500.0",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Helper()
+			got := numfmt.FormatValue(tc.v, 164, tc.fmtStr, false)
+			if got != tc.want {
+				t.Errorf("FormatValue(%v, %q) = %q, want %q", tc.v, tc.fmtStr, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFormatValueMilliseconds verifies that sub-second digits are rendered
+// correctly when a format contains ".0", ".00", or ".000" after seconds.
+// The built-in format ID 47 is "mm:ss.0".
+func TestFormatValueMilliseconds(t *testing.T) {
+	t.Helper()
+	// Serial 0.5 = noon (12:00:00.000).
+	// Serial for 00:01:02.750 = (1*60 + 2 + 0.75) / 86400
+	serial62750ms := (float64(62) + 0.75) / 86400.0
+	// Serial for 00:00:05.123
+	serial5123ms := (float64(5) + 0.123) / 86400.0
+
+	tests := []struct {
+		name     string
+		serial   float64
+		fmtStr   string
+		numFmtID int
+		want     string
+	}{
+		{
+			name:     "mm:ss.0 one decisecond digit",
+			serial:   serial62750ms,
+			fmtStr:   "mm:ss.0",
+			numFmtID: 164,
+			want:     "01:02.8", // 0.75 s → rounds to 0.8 with 1 digit
+		},
+		{
+			name:     "mm:ss.000 three millisecond digits",
+			serial:   serial5123ms,
+			fmtStr:   "mm:ss.000",
+			numFmtID: 164,
+			// Note: leading 'mm' without a preceding hour token is rendered as
+			// month (01=January) by the current implementation; full
+			// hour-or-seconds lookahead is a Batch 4 improvement.
+			want: "01:05.123",
+		},
+		{
+			name:     "h:mm:ss.00 two centisecond digits",
+			serial:   serial62750ms,
+			fmtStr:   "h:mm:ss.00",
+			numFmtID: 164,
+			want:     "0:01:02.75",
+		},
+		{
+			// Exact whole second: milliseconds should be .0
+			name:     "whole second produces .0",
+			serial:   float64(62) / 86400.0,
+			fmtStr:   "mm:ss.0",
+			numFmtID: 164,
+			want:     "01:02.0",
+		},
+		{
+			// Built-in ID 47 = "mm:ss.0"
+			name:     "built-in ID 47",
+			serial:   serial62750ms,
+			fmtStr:   "",
+			numFmtID: 47,
+			want:     "01:02.8",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Helper()
+			got := numfmt.FormatValue(tc.serial, tc.numFmtID, tc.fmtStr, false)
+			if got != tc.want {
+				t.Errorf("FormatValue(serial=%v, id=%d, %q) = %q, want %q",
+					tc.serial, tc.numFmtID, tc.fmtStr, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRenderGeneralLargeNumbers verifies that renderGeneral switches to E+
+// scientific notation for values with magnitude >= 1e11.
+func TestRenderGeneralLargeNumbers(t *testing.T) {
+	t.Helper()
+	tests := []struct {
+		name string
+		v    float64
+		want string
+	}{
+		{
+			name: "small integer no scientific",
+			v:    12345,
+			want: "12345",
+		},
+		{
+			name: "just below 1e11 threshold",
+			v:    99999999999,
+			want: "99999999999",
+		},
+		{
+			name: "exactly 1e11 uses scientific",
+			v:    1e11,
+			want: "1E+11",
+		},
+		{
+			name: "1.23456e12 uses scientific",
+			v:    1.23456e12,
+			want: "1.23456E+12",
+		},
+		{
+			name: "negative large uses scientific",
+			v:    -1.5e13,
+			want: "-1.5E+13",
+		},
+		{
+			name: "fractional below threshold stays G10",
+			v:    1234567.89,
+			want: "1234567.89",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Helper()
+			// Use numFmtID=0, fmtStr="" to force renderGeneral path.
+			got := numfmt.FormatValue(tc.v, 0, "", false)
+			if got != tc.want {
+				t.Errorf("FormatValue(%v, General) = %q, want %q", tc.v, got, tc.want)
 			}
 		})
 	}

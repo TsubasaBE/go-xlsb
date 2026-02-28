@@ -345,9 +345,10 @@ func parseStyleTable(data []byte) (styles.StyleTable, error) {
 // callers.  All three copies must stay in sync.
 func isDateFormatID(id int, formatStr string) bool {
 	switch {
-	case id >= 14 && id <= 17:
-		return true
-	case id == 22:
+	case id >= 14 && id <= 22:
+		// IDs 14-17: date formats (m/d/yy, d-mmm-yy, d-mmm, mmm-yy)
+		// IDs 18-21: time formats (h:mm AM/PM, h:mm:ss AM/PM, h:mm, h:mm:ss)
+		// ID 22: datetime format (m/d/yy h:mm)
 		return true
 	case id >= 27 && id <= 36:
 		return true
