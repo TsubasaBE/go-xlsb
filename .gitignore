@@ -24,6 +24,10 @@ Thumbs.db
 *.swo
 *~
 
+# Windows reserved device names that git may surface on Windows
+nul
+nul.*
+
 pyxlsb/
 file_example_XLSX_5000.xlsx
 docs/official_microsoft_xlsb_format_documentation.pdf
