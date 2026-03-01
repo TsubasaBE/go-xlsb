@@ -213,6 +213,10 @@ func (ws *Worksheet) Rows(sparse bool) func(yield func([]Cell) bool) {
 			case recID == biff12.Row:
 				r, err := parseRowRecord(recData)
 				if err != nil {
+					// Record the error so callers can detect that at least one row
+					// was skipped, but continue streaming the remaining rows rather
+					// than aborting — partial output is better than none.
+					ws.Err = fmt.Errorf("worksheet: malformed ROW record: %w", err)
 					continue
 				}
 				// Skip duplicate ROW records (same index as the current row).
@@ -249,7 +253,15 @@ func (ws *Worksheet) Rows(sparse bool) func(yield func([]Cell) bool) {
 				if err != nil {
 					continue
 				}
-				if c.C >= 0 && c.C < len(row) {
+				if c.C >= 0 {
+					// Grow the row if the cell lies beyond the declared
+					// Dimension.  This can happen when the DIMENSION record is
+					// absent, wrong, or when Excel writes data outside its own
+					// declared extent.  Growing ensures the cell is never
+					// silently dropped.
+					if c.C >= len(row) {
+						row = growRow(row, c.C)
+					}
 					row[c.C] = Cell{R: rowNum, C: c.C, V: c.V, Style: c.Style}
 				}
 
@@ -288,6 +300,20 @@ func makeEmptyRow(rowNum int, dim *Dimension) []Cell {
 		cells[i] = Cell{R: rowNum, C: i}
 	}
 	return cells
+}
+
+// growRow extends row so that index col is a valid index, filling any new
+// positions with zero-value Cells.  It returns the (possibly re-allocated)
+// slice.  This is called when a cell's column index exceeds the width that was
+// declared in the DIMENSION record — which can happen when that record is
+// absent, incorrect, or when the file has data beyond its declared extent.
+func growRow(row []Cell, col int) []Cell {
+	need := col + 1
+	if need <= len(row) {
+		return row
+	}
+	extra := make([]Cell, need-len(row))
+	return append(row, extra...)
 }
 
 // parse does the pre-scan pass: reads Dimension, Col defs, Hyperlinks and
@@ -533,35 +559,47 @@ func parseCellRecord(data []byte, recID int, st *stringtable.StringTable) (inter
 		style = 0
 	}
 
+	// cellParseErr is the sentinel value placed in Cell.V when the record's
+	// value bytes are present but cannot be decoded (truncated or malformed
+	// data).  Using a visible error string rather than nil means the cell will
+	// never be silently indistinguishable from a genuinely blank (Blank record)
+	// cell — the caller can see that something went wrong.
+	const cellParseErr = "#VALUE!"
+
 	var v any
 	switch recID {
 	case biff12.Num:
 		f, err := rr.ReadFloat()
 		if err != nil {
+			v = cellParseErr
 			break
 		}
 		v = f
 	case biff12.BoolErr:
 		b, err := rr.ReadUint8()
 		if err != nil {
+			v = cellParseErr
 			break
 		}
 		v = errString(b)
 	case biff12.Bool:
 		b, err := rr.ReadUint8()
 		if err != nil {
+			v = cellParseErr
 			break
 		}
 		v = b != 0
 	case biff12.Float:
 		f, err := rr.ReadDouble()
 		if err != nil {
+			v = cellParseErr
 			break
 		}
 		v = f
 	case biff12.String:
 		idx, err := rr.ReadUint32()
 		if err != nil {
+			v = cellParseErr
 			break
 		}
 		// Use uint32 comparison to stay safe on 32-bit platforms where
@@ -575,24 +613,28 @@ func parseCellRecord(data []byte, recID int, st *stringtable.StringTable) (inter
 	case biff12.FormulaString:
 		s, err := rr.ReadString()
 		if err != nil {
+			v = cellParseErr
 			break
 		}
 		v = s
 	case biff12.FormulaFloat:
 		f, err := rr.ReadDouble()
 		if err != nil {
+			v = cellParseErr
 			break
 		}
 		v = f
 	case biff12.FormulaBool:
 		b, err := rr.ReadUint8()
 		if err != nil {
+			v = cellParseErr
 			break
 		}
 		v = b != 0
 	case biff12.FormulaBoolErr:
 		b, err := rr.ReadUint8()
 		if err != nil {
+			v = cellParseErr
 			break
 		}
 		v = errString(b)

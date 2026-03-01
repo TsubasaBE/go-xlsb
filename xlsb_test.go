@@ -2839,3 +2839,467 @@ func TestFormatValueChineseAmPm(t *testing.T) {
 		})
 	}
 }
+
+// TestFormatValueConditionalSections verifies that bracket-condition section
+// selection works correctly: the first section whose [op operand] condition is
+// satisfied is chosen, the renderer receives math.Abs(val), and when no
+// condition is satisfied the fallback unconditional section is used.
+func TestFormatValueConditionalSections(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		v      float64
+		fmtStr string
+		want   string
+	}{
+		// [>=1000]#,##0 matches 1500 → abs(1500)=1500 → "1,500"
+		{name: "ge1000 matches positive", v: 1500, fmtStr: `[>=1000]#,##0;[<0]"neg ";0`, want: "1,500"},
+		// [<0] matches -50 → abs(-50)=50, section is literal "neg " only → "neg "
+		{name: "lt0 matches negative", v: -50, fmtStr: `[>=1000]#,##0;[<0]"neg ";0`, want: "neg "},
+		// Neither condition matches 50 (not >=1000, not <0) → fallback section "0" → "50"
+		{name: "fallback unconditional", v: 50, fmtStr: `[>=1000]#,##0;[<0]"neg ";0`, want: "50"},
+		// Neither condition matches 999 → fallback → "999"
+		{name: "fallback just below threshold", v: 999, fmtStr: `[>=1000]#,##0;[<0]"neg ";0`, want: "999"},
+		// [=0] matches 0 → "zero"
+		{name: "eq0 matches zero", v: 0, fmtStr: `[=0]"zero";0.00`, want: "zero"},
+		// [=0] does not match 1.5 → fallback 0.00 → "1.50"
+		{name: "eq0 no match", v: 1.5, fmtStr: `[=0]"zero";0.00`, want: "1.50"},
+		// [<>0] matches 0.5 → 0.50 × 100% = "50.00%"
+		{name: "ne0 matches nonzero", v: 0.5, fmtStr: `[<>0]0.00%;"zero"`, want: "50.00%"},
+		// [<>0] does not match 0 → fallback "zero"
+		{name: "ne0 no match zero", v: 0, fmtStr: `[<>0]0.00%;"zero"`, want: "zero"},
+		// Condition combined with a color token — color is decorative, value renders normally.
+		{name: "condition with color token", v: 2500, fmtStr: `[>=1000][Red]#,##0;0`, want: "2,500"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := numfmt.FormatValue(tc.v, 164, tc.fmtStr, false)
+			if got != tc.want {
+				t.Errorf("FormatValue(%v, %q) = %q, want %q", tc.v, tc.fmtStr, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFormatValueHashZeroSuppression verifies that the '#' digit placeholder
+// suppresses leading/trailing zeros, matching Excel's behaviour.
+func TestFormatValueHashZeroSuppression(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		v      float64
+		fmtStr string
+		want   string
+	}{
+		// Pure '#' — zero has no significant integer digit to display → ""
+		{name: "zero with hash only", v: 0, fmtStr: "#", want: ""},
+		// 0.5 with "#.##" — no integer digit, but ".5" for the fractional part
+		{name: "0.5 hash dot hash hash", v: 0.5, fmtStr: "#.##", want: ".5"},
+		// 1.5 → "1.5" (integer digit present)
+		{name: "1.5 hash dot hash hash", v: 1.5, fmtStr: "#.##", want: "1.5"},
+		// Zero with thousands-grouped '#' → ""
+		{name: "zero with hash thousands", v: 0, fmtStr: "#,###", want: ""},
+		// 1234 with '#,###' → "1,234"
+		{name: "1234 hash thousands", v: 1234, fmtStr: "#,###", want: "1,234"},
+		// "0" placeholder always shows a digit even for zero.
+		{name: "zero with zero placeholder", v: 0, fmtStr: "0", want: "0"},
+		// Mix: '0.##' — integer zero is forced, fractional hashes suppressed
+		{name: "0.5 zero dot hash hash", v: 0.5, fmtStr: "0.##", want: "0.5"},
+		{name: "zero zero dot hash hash", v: 0, fmtStr: "0.##", want: "0"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := numfmt.FormatValue(tc.v, 164, tc.fmtStr, false)
+			if got != tc.want {
+				t.Errorf("FormatValue(%v, %q) = %q, want %q", tc.v, tc.fmtStr, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFormatValueScientificSignWrapper verifies that renderScientific honours
+// sign-wrapper parentheses in a two-section format, matching renderNumber's
+// existing behaviour.
+func TestFormatValueScientificSignWrapper(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		v      float64
+		fmtStr string
+		want   string
+	}{
+		// Negative in parentheses section.
+		{name: "negative in parens", v: -1234.5, fmtStr: "0.00E+00;(0.00E+00)", want: "(1.23E+03)"},
+		// Positive uses first section, no parens.
+		{name: "positive no parens", v: 1234.5, fmtStr: "0.00E+00;(0.00E+00)", want: "1.23E+03"},
+		// Single section: minus sign must be prepended.
+		{name: "single section negative", v: -1234.5, fmtStr: "0.00E+00", want: "-1.23E+03"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := numfmt.FormatValue(tc.v, 164, tc.fmtStr, false)
+			if got != tc.want {
+				t.Errorf("FormatValue(%v, %q) = %q, want %q", tc.v, tc.fmtStr, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFormatValueFractionSignWrapper verifies that renderFraction honours
+// sign-wrapper parentheses in a two-section format.
+func TestFormatValueFractionSignWrapper(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		v      float64
+		fmtStr string
+		want   string
+	}{
+		// Negative in parentheses section.
+		{name: "negative in parens", v: -1.75, fmtStr: "# ?/?;(# ?/?)", want: "(1 3/4)"},
+		// Positive uses first section, no parens.
+		{name: "positive no parens", v: 1.75, fmtStr: "# ?/?;(# ?/?)", want: "1 3/4"},
+		// Single section: minus sign must be prepended.
+		{name: "single section negative", v: -1.75, fmtStr: "# ?/?", want: "-1 3/4"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := numfmt.FormatValue(tc.v, 164, tc.fmtStr, false)
+			if got != tc.want {
+				t.Errorf("FormatValue(%v, %q) = %q, want %q", tc.v, tc.fmtStr, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFormatValueColorToken verifies that color tokens ([Red], [Color N]) are
+// treated as decorative — they do not alter the rendered number value.
+func TestFormatValueColorToken(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		v      float64
+		fmtStr string
+		want   string
+	}{
+		{name: "named color Red", v: 42.5, fmtStr: "[Red]0.00", want: "42.50"},
+		{name: "numeric Color 3", v: 42.5, fmtStr: "[Color 3]0.00", want: "42.50"},
+		{name: "color negative", v: -42.5, fmtStr: "[Blue]0.00", want: "-42.50"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := numfmt.FormatValue(tc.v, 164, tc.fmtStr, false)
+			if got != tc.want {
+				t.Errorf("FormatValue(%v, %q) = %q, want %q", tc.v, tc.fmtStr, got, tc.want)
+			}
+		})
+	}
+}
+
+// ── fall-back / no-silent-drop guarantees ─────────────────────────────────────
+
+// buildXLSBWithRawCellPayload builds a minimal .xlsb in memory where the cell
+// record for the given recID is written with the supplied raw payload bytes
+// instead of a well-formed value field.  The DIMENSION record declares a 1×1
+// sheet (row 0, col 0 only).
+//
+// The sheet has no shared-string table (not needed for these tests).
+func buildXLSBWithRawCellPayload(t *testing.T, recID int, colStylePayload []byte) []byte {
+	t.Helper()
+
+	// xl/workbook.bin
+	var wb bytes.Buffer
+	biff12WriteRec(&wb, 0x0183, nil)
+	biff12WriteRec(&wb, 0x018F, nil)
+	var sheetRec bytes.Buffer
+	sheetRec.Write(biff12Le32(0))
+	sheetRec.Write(biff12Le32(1))
+	sheetRec.Write(biff12EncStr("rId1"))
+	sheetRec.Write(biff12EncStr("Sheet1"))
+	biff12WriteRec(&wb, 0x019C, sheetRec.Bytes())
+	biff12WriteRec(&wb, 0x0190, nil)
+	biff12WriteRec(&wb, 0x0184, nil)
+
+	// xl/worksheets/sheet1.bin
+	var ws bytes.Buffer
+	biff12WriteRec(&ws, 0x0181, nil)
+	// DIMENSION: r1=0, r2=0, c1=0, c2=0
+	var dimPay bytes.Buffer
+	dimPay.Write(biff12Le32(0))
+	dimPay.Write(biff12Le32(0))
+	dimPay.Write(biff12Le32(0))
+	dimPay.Write(biff12Le32(0))
+	biff12WriteRec(&ws, 0x0194, dimPay.Bytes())
+	biff12WriteRec(&ws, 0x0191, nil)            // SHEETDATA start
+	biff12WriteRec(&ws, 0x0000, biff12Le32(0))  // ROW 0
+	biff12WriteRec(&ws, recID, colStylePayload) // cell with caller-supplied payload
+	biff12WriteRec(&ws, 0x0192, nil)            // SHEETDATA end
+	biff12WriteRec(&ws, 0x0182, nil)
+
+	var zipBuf bytes.Buffer
+	zw := zip.NewWriter(&zipBuf)
+	relsXML := `<?xml version="1.0" encoding="UTF-8"?>` +
+		`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+		`<Relationship Id="rId1" Type="worksheet" Target="worksheets/sheet1.bin"/>` +
+		`</Relationships>`
+	zipAddFile(t, zw, "xl/_rels/workbook.bin.rels", []byte(relsXML))
+	zipAddFile(t, zw, "xl/workbook.bin", wb.Bytes())
+	zipAddFile(t, zw, "xl/worksheets/sheet1.bin", ws.Bytes())
+	if err := zw.Close(); err != nil {
+		t.Fatalf("zip close: %v", err)
+	}
+	return zipBuf.Bytes()
+}
+
+// collectCells opens the first sheet of data and returns all non-nil Cell
+// values together with ws.Err after iteration finishes.
+func collectCells(t *testing.T, data []byte) (cells []worksheet.Cell, wsErr error) {
+	t.Helper()
+	wb, err := workbook.OpenReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatalf("OpenReader: %v", err)
+	}
+	defer wb.Close()
+
+	sheet, err := wb.Sheet(1)
+	if err != nil {
+		t.Fatalf("Sheet(1): %v", err)
+	}
+	for row := range sheet.Rows(true) {
+		for _, c := range row {
+			if c.V != nil {
+				cells = append(cells, c)
+			}
+		}
+	}
+	return cells, sheet.Err
+}
+
+// TestCellTruncatedValueBytesSentinel verifies Fix 1: when a non-Blank cell
+// record's value bytes are truncated (only col+style present, no value field),
+// parseCellRecord must set V = "#VALUE!" rather than leaving it nil.
+//
+// This guarantees that a cell with real data can never be silently
+// indistinguishable from a genuinely empty (Blank) cell.
+func TestCellTruncatedValueBytesSentinel(t *testing.T) {
+	t.Parallel()
+
+	// These record IDs all expect value bytes after col(4)+style(4).
+	// We supply only col(4)+style(4) — no value — so every ReadXxx call will
+	// fail with an underflow error.
+	recIDs := []struct {
+		name  string
+		recID int
+	}{
+		{"Num (RK)", biff12.Num},
+		{"BoolErr", biff12.BoolErr},
+		{"Bool", biff12.Bool},
+		{"Float", biff12.Float},
+		{"FormulaFloat", biff12.FormulaFloat},
+		{"FormulaBool", biff12.FormulaBool},
+		{"FormulaBoolErr", biff12.FormulaBoolErr},
+	}
+
+	// col=0, style=0, no value bytes — triggers the underflow in every type arm.
+	truncatedPayload := append(biff12Le32(0), biff12Le32(0)...)
+
+	for _, tc := range recIDs {
+		t.Run(tc.name, func(t *testing.T) {
+			data := buildXLSBWithRawCellPayload(t, tc.recID, truncatedPayload)
+			cells, _ := collectCells(t, data)
+			if len(cells) == 0 {
+				t.Fatalf("recID 0x%04X: cell was silently dropped; want V=%q", tc.recID, "#VALUE!")
+			}
+			if got := cells[0].V; got != "#VALUE!" {
+				t.Errorf("recID 0x%04X: V = %v (%T), want %q", tc.recID, got, got, "#VALUE!")
+			}
+		})
+	}
+}
+
+// TestCellColumnBeyondDimensionGrowsRow verifies Fix 2: when a cell's column
+// index exceeds the width declared in the DIMENSION record, the row must be
+// extended to accommodate it rather than the cell being silently dropped.
+func TestCellColumnBeyondDimensionGrowsRow(t *testing.T) {
+	t.Parallel()
+
+	// DIMENSION declares c2=0 (width 1, only col 0).
+	// We write a FLOAT cell at col 5 — well outside the declared extent.
+	// The cell must appear in the yielded row at index 5, not be dropped.
+
+	var ws bytes.Buffer
+	biff12WriteRec(&ws, 0x0181, nil)
+	// DIMENSION: r1=0, r2=0, c1=0, c2=0
+	var dimPay bytes.Buffer
+	dimPay.Write(biff12Le32(0))
+	dimPay.Write(biff12Le32(0))
+	dimPay.Write(biff12Le32(0))
+	dimPay.Write(biff12Le32(0))
+	biff12WriteRec(&ws, 0x0194, dimPay.Bytes())
+	biff12WriteRec(&ws, 0x0191, nil)           // SHEETDATA
+	biff12WriteRec(&ws, 0x0000, biff12Le32(0)) // ROW 0
+
+	// FLOAT cell at col 5 with value 99.0
+	var cellPay bytes.Buffer
+	cellPay.Write(biff12Le32(5)) // col = 5
+	cellPay.Write(biff12Le32(0)) // style
+	var f64 [8]byte
+	binary.LittleEndian.PutUint64(f64[:], math.Float64bits(99.0))
+	cellPay.Write(f64[:])
+	biff12WriteRec(&ws, 0x0005, cellPay.Bytes()) // FLOAT
+
+	biff12WriteRec(&ws, 0x0192, nil)
+	biff12WriteRec(&ws, 0x0182, nil)
+
+	// xl/workbook.bin
+	var wb bytes.Buffer
+	biff12WriteRec(&wb, 0x0183, nil)
+	biff12WriteRec(&wb, 0x018F, nil)
+	var sheetRec bytes.Buffer
+	sheetRec.Write(biff12Le32(0))
+	sheetRec.Write(biff12Le32(1))
+	sheetRec.Write(biff12EncStr("rId1"))
+	sheetRec.Write(biff12EncStr("Sheet1"))
+	biff12WriteRec(&wb, 0x019C, sheetRec.Bytes())
+	biff12WriteRec(&wb, 0x0190, nil)
+	biff12WriteRec(&wb, 0x0184, nil)
+
+	var zipBuf bytes.Buffer
+	zw := zip.NewWriter(&zipBuf)
+	relsXML := `<?xml version="1.0" encoding="UTF-8"?>` +
+		`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+		`<Relationship Id="rId1" Type="worksheet" Target="worksheets/sheet1.bin"/>` +
+		`</Relationships>`
+	zipAddFile(t, zw, "xl/_rels/workbook.bin.rels", []byte(relsXML))
+	zipAddFile(t, zw, "xl/workbook.bin", wb.Bytes())
+	zipAddFile(t, zw, "xl/worksheets/sheet1.bin", ws.Bytes())
+	if err := zw.Close(); err != nil {
+		t.Fatalf("zip close: %v", err)
+	}
+	data := zipBuf.Bytes()
+
+	wbk, err := workbook.OpenReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatalf("OpenReader: %v", err)
+	}
+	defer wbk.Close()
+
+	sheet, err := wbk.Sheet(1)
+	if err != nil {
+		t.Fatalf("Sheet(1): %v", err)
+	}
+
+	var found bool
+	for row := range sheet.Rows(true) {
+		for _, c := range row {
+			if c.C == 5 {
+				found = true
+				if c.V != 99.0 {
+					t.Errorf("cell[0][5].V = %v (%T), want 99.0", c.V, c.V)
+				}
+			}
+		}
+	}
+	if !found {
+		t.Error("cell at col 5 was silently dropped; want V=99.0")
+	}
+}
+
+// TestRowMalformedRecordSetsErr verifies Fix 3: when a ROW record cannot be
+// decoded, ws.Err is set after iteration so the caller can detect that parsing
+// was imperfect, rather than the failure being completely invisible.
+//
+// The remaining rows (if any) must still be yielded — the iterator must not
+// abort on the first bad ROW record.
+func TestRowMalformedRecordSetsErr(t *testing.T) {
+	t.Parallel()
+
+	// Build a sheet with:
+	//   - one malformed ROW record (0 bytes — parseRowRecord requires ≥4)
+	//   - one valid ROW record (row 1) with a FLOAT cell
+	//
+	// We expect ws.Err != nil AND the valid cell to still be yielded.
+
+	var ws bytes.Buffer
+	biff12WriteRec(&ws, 0x0181, nil)
+	// DIMENSION: r1=0, r2=1, c1=0, c2=0
+	var dimPay bytes.Buffer
+	dimPay.Write(biff12Le32(0))
+	dimPay.Write(biff12Le32(1))
+	dimPay.Write(biff12Le32(0))
+	dimPay.Write(biff12Le32(0))
+	biff12WriteRec(&ws, 0x0194, dimPay.Bytes())
+	biff12WriteRec(&ws, 0x0191, nil) // SHEETDATA start
+
+	// Malformed ROW — zero-byte payload (parseRowRecord will fail).
+	biff12WriteRec(&ws, 0x0000, nil)
+
+	// Valid ROW 1 with a FLOAT cell at col 0 = 7.0
+	biff12WriteRec(&ws, 0x0000, biff12Le32(1)) // ROW 1
+	var cellPay bytes.Buffer
+	cellPay.Write(biff12Le32(0)) // col
+	cellPay.Write(biff12Le32(0)) // style
+	var f64 [8]byte
+	binary.LittleEndian.PutUint64(f64[:], math.Float64bits(7.0))
+	cellPay.Write(f64[:])
+	biff12WriteRec(&ws, 0x0005, cellPay.Bytes()) // FLOAT
+
+	biff12WriteRec(&ws, 0x0192, nil)
+	biff12WriteRec(&ws, 0x0182, nil)
+
+	// xl/workbook.bin
+	var wb bytes.Buffer
+	biff12WriteRec(&wb, 0x0183, nil)
+	biff12WriteRec(&wb, 0x018F, nil)
+	var sheetRec bytes.Buffer
+	sheetRec.Write(biff12Le32(0))
+	sheetRec.Write(biff12Le32(1))
+	sheetRec.Write(biff12EncStr("rId1"))
+	sheetRec.Write(biff12EncStr("Sheet1"))
+	biff12WriteRec(&wb, 0x019C, sheetRec.Bytes())
+	biff12WriteRec(&wb, 0x0190, nil)
+	biff12WriteRec(&wb, 0x0184, nil)
+
+	var zipBuf bytes.Buffer
+	zw := zip.NewWriter(&zipBuf)
+	relsXML := `<?xml version="1.0" encoding="UTF-8"?>` +
+		`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+		`<Relationship Id="rId1" Type="worksheet" Target="worksheets/sheet1.bin"/>` +
+		`</Relationships>`
+	zipAddFile(t, zw, "xl/_rels/workbook.bin.rels", []byte(relsXML))
+	zipAddFile(t, zw, "xl/workbook.bin", wb.Bytes())
+	zipAddFile(t, zw, "xl/worksheets/sheet1.bin", ws.Bytes())
+	if err := zw.Close(); err != nil {
+		t.Fatalf("zip close: %v", err)
+	}
+	data := zipBuf.Bytes()
+
+	wbk, err := workbook.OpenReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatalf("OpenReader: %v", err)
+	}
+	defer wbk.Close()
+
+	sheet, err := wbk.Sheet(1)
+	if err != nil {
+		t.Fatalf("Sheet(1): %v", err)
+	}
+
+	var found bool
+	for row := range sheet.Rows(true) {
+		for _, c := range row {
+			if c.V == 7.0 {
+				found = true
+			}
+		}
+	}
+
+	// ws.Err must be set to signal the malformed row.
+	if sheet.Err == nil {
+		t.Error("ws.Err is nil; want non-nil error for malformed ROW record")
+	}
+	// Despite the error the valid cell on row 1 must still be visible.
+	if !found {
+		t.Error("valid cell (V=7.0) on row 1 was not yielded after malformed ROW record")
+	}
+}

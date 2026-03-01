@@ -115,14 +115,23 @@ func resolveFormat(numFmtID int, fmtStr string) string {
 // Parts[0] when the bracket contains a "$symbol" prefix before the "-locale"
 // suffix.  If no symbol part is found the raw TValue (which includes the
 // surrounding brackets) is returned as a fallback.
+//
+// Brackets that do not begin with "[$" are not currency brackets — they may be
+// color brackets like "[Color 3]" or "[Red]" that nfp also classifies as
+// CurrencyLanguage tokens.  Those return "" so they are treated as decorative.
 func currencySymbol(tok nfp.Token) string {
+	// Only real currency brackets start with "[$".  Color brackets like
+	// "[Color 3]" or "[Red]" look similar but carry no printable symbol.
+	raw := tok.TValue
+	if len(raw) < 3 || raw[0] != '[' || raw[1] != '$' {
+		return ""
+	}
 	for _, p := range tok.Parts {
 		if p.Token.TType == nfp.TokenSubTypeCurrencyString {
 			return p.Token.TValue
 		}
 	}
 	// Fallback: strip the outer brackets and any "-locale" suffix.
-	raw := tok.TValue
 	if len(raw) >= 2 && raw[0] == '[' && raw[len(raw)-1] == ']' {
 		inner := raw[1 : len(raw)-1]
 		// Strip the leading '$' that the bracket format uses.
@@ -161,40 +170,128 @@ func formatFloat(val float64, numFmtID int, effective string, date1904 bool) str
 	}
 
 	// Determine which section applies.
-	sec := selectSection(sections, val)
+	// useAbs is true when the selected section was chosen by a conditional
+	// bracket (e.g. [>=1000]) — in that case Excel renders math.Abs(val)
+	// because the condition itself encodes the sign semantics.
+	sec, useAbs := selectSection(sections, val)
+
+	renderVal := val
+	if useAbs {
+		renderVal = math.Abs(val)
+	}
 
 	// Date / elapsed path.
 	if isDateFormat(numFmtID, effective) {
-		return renderDateTime(val, sec, date1904)
+		return renderDateTime(renderVal, sec, date1904)
 	}
 
 	// Number path.
-	return renderNumber(val, sec, sections)
+	return renderNumber(renderVal, sec, sections)
 }
 
-// selectSection picks the correct section based on the value's sign.
+// extractCondition returns the operator and numeric operand from the first
+// TokenTypeCondition token found in sec, if any.  The operator is one of the
+// six Excel condition operators: "<", "<=", ">", ">=", "<>", "=".
+func extractCondition(sec nfp.Section) (op string, operand float64, ok bool) {
+	for _, tok := range sec.Items {
+		if tok.TType != nfp.TokenTypeCondition {
+			continue
+		}
+		if len(tok.Parts) < 2 {
+			continue
+		}
+		op = tok.Parts[0].Token.TValue
+		operandStr := tok.Parts[1].Token.TValue
+		var err error
+		operand, err = strconv.ParseFloat(operandStr, 64)
+		if err != nil {
+			continue
+		}
+		return op, operand, true
+	}
+	return "", 0, false
+}
+
+// evalCondition returns true when val satisfies the condition op operand.
+func evalCondition(val float64, op string, operand float64) bool {
+	switch op {
+	case "<":
+		return val < operand
+	case "<=":
+		return val <= operand
+	case ">":
+		return val > operand
+	case ">=":
+		return val >= operand
+	case "<>":
+		return val != operand
+	case "=":
+		return val == operand
+	}
+	return false
+}
+
+// selectSection picks the correct section for val and reports whether the
+// caller should use math.Abs(val) when rendering.
 //
-//	1 section  → applies to all values
-//	2 sections → [0]=positive+zero  [1]=negative
-//	3 sections → [0]=positive  [1]=negative  [2]=zero
-//	4 sections → [0]=positive  [1]=negative  [2]=zero  [3]=text
-func selectSection(sections []nfp.Section, val float64) nfp.Section {
+// Conditional formats (sections whose first token is a [condition] bracket)
+// are evaluated first: sections are tested in order and the first match wins.
+// When a conditional section is selected, useAbs is true — the condition
+// itself encodes the sign semantics, so the renderer receives the magnitude.
+//
+// When no section carries a condition token the classic sign-based rules apply:
+//
+//	1 section  → applies to all values                          (useAbs=false)
+//	2 sections → [0]=positive+zero  [1]=negative                (useAbs=false)
+//	3 sections → [0]=positive  [1]=negative  [2]=zero           (useAbs=false)
+//	4 sections → [0]=positive  [1]=negative  [2]=zero  [3]=text (useAbs=false)
+//
+// If a conditional format is present but no section matches val, the function
+// falls through to a final unconditional section if one exists, or returns the
+// last section as a safe fallback.
+func selectSection(sections []nfp.Section, val float64) (sec nfp.Section, useAbs bool) {
+	// First pass: collect which sections carry a condition token.
+	hasAnyCondition := false
+	for i := range sections {
+		if op, operand, ok := extractCondition(sections[i]); ok {
+			hasAnyCondition = true
+			if evalCondition(val, op, operand) {
+				return sections[i], true
+			}
+			_ = operand // already used above
+			_ = op
+		}
+	}
+
+	if hasAnyCondition {
+		// No condition matched.  Excel's behaviour: use the last section that
+		// has no condition token as a fallback, otherwise use the last section.
+		for i := len(sections) - 1; i >= 0; i-- {
+			if _, _, ok := extractCondition(sections[i]); !ok {
+				return sections[i], false
+			}
+		}
+		// All sections have conditions and none matched — last section is safest.
+		return sections[len(sections)-1], true
+	}
+
+	// Classic sign-based selection (no conditions present).
 	switch {
 	case len(sections) == 1:
-		return sections[0]
+		return sections[0], false
 	case len(sections) == 2:
 		if val < 0 {
-			return sections[1]
+			return sections[1], false
 		}
-		return sections[0]
+		return sections[0], false
 	default: // 3 or 4
 		switch {
 		case val > 0:
-			return sections[0]
+			return sections[0], false
 		case val < 0:
-			return sections[1]
+			return sections[1], false
 		default: // zero
-			return sections[2]
+			return sections[2], false
 		}
 	}
 }
@@ -708,16 +805,19 @@ func renderNumber(val float64, sec nfp.Section, sections []nfp.Section) string {
 
 	// ── pass 1: collect format metadata ──────────────────────────────────────
 	type meta struct {
-		hasPercent      bool
-		hasThousands    bool
-		trailingCommas  int // number of trailing commas after last digit placeholder (scaling)
-		decZeros        int // count of '0' placeholders after decimal point
-		decHashes       int // count of '#' placeholders after decimal point
-		decQuestions    int // count of '?' placeholders after decimal point
-		intZeros        int // count of '0' placeholders before decimal point
-		intQuestions    int // count of '?' placeholders before decimal point
-		hasDecimal      bool
-		hasExplicitSign bool // literal '+' or '-' in the section
+		hasPercent          bool
+		hasThousands        bool
+		trailingCommas      int // number of trailing commas after last digit placeholder (scaling)
+		decZeros            int // count of '0' placeholders after decimal point
+		decHashes           int // count of '#' placeholders after decimal point
+		decQuestions        int // count of '?' placeholders after decimal point
+		intZeros            int // count of '0' placeholders before decimal point
+		intHashes           int // count of '#' placeholders before decimal point
+		intQuestions        int // count of '?' placeholders before decimal point
+		hasDecimal          bool
+		hasExplicitSign     bool // literal '+' or '-' in the section
+		hasDigitPlaceholder bool // any digit placeholder (0, #, ?) in the section
+		hasOutputToken      bool // any token that can produce visible output (not purely decorative)
 	}
 	var m meta
 	afterDecimal := false
@@ -747,6 +847,12 @@ func renderNumber(val float64, sec nfp.Section, sections []nfp.Section) string {
 	}
 	for _, tok := range sec.Items {
 		switch tok.TType {
+		case nfp.TokenTypeColor, nfp.TokenTypeCondition:
+			// Purely decorative — do not set hasOutputToken.
+		default:
+			m.hasOutputToken = true
+		}
+		switch tok.TType {
 		case nfp.TokenTypePercent:
 			m.hasPercent = true
 		case nfp.TokenTypeThousandsSeparator:
@@ -769,16 +875,21 @@ func renderNumber(val float64, sec nfp.Section, sections []nfp.Section) string {
 			}
 			afterDecimal = true
 		case nfp.TokenTypeZeroPlaceHolder:
+			m.hasDigitPlaceholder = true
 			if afterDecimal {
 				m.decZeros += len(tok.TValue)
 			} else {
 				m.intZeros += len(tok.TValue)
 			}
 		case nfp.TokenTypeHashPlaceHolder:
+			m.hasDigitPlaceholder = true
 			if afterDecimal {
 				m.decHashes += len(tok.TValue)
+			} else {
+				m.intHashes += len(tok.TValue)
 			}
 		case nfp.TokenTypeDigitalPlaceHolder:
+			m.hasDigitPlaceholder = true
 			// '?' — space-padded digit placeholder.
 			if afterDecimal {
 				m.decQuestions += len(tok.TValue)
@@ -850,6 +961,16 @@ func renderNumber(val float64, sec nfp.Section, sections []nfp.Section) string {
 	// '?' pads with leading spaces instead of zeros.
 	for len(intStr) < m.intZeros+m.intQuestions {
 		intStr = " " + intStr
+	}
+	// '#' placeholders suppress a leading zero: if the integer part is "0"
+	// and the format has ONLY '#' integer placeholders (no '0'), suppress it.
+	// This matches Excel's behaviour: "#" → "", "#.##" with 0.5 → ".5".
+	// Formats with no integer placeholders at all (e.g. ".00") must NOT
+	// suppress: their intStr will be prepended later in the afterDecimal path.
+	hashSuppressed := false
+	if m.intZeros == 0 && m.intHashes > 0 && intStr == "0" {
+		intStr = ""
+		hashSuppressed = true
 	}
 
 	// ── apply thousands separator ─────────────────────────────────────────────
@@ -976,11 +1097,13 @@ func renderNumber(val float64, sec nfp.Section, sections []nfp.Section) string {
 		}
 	}
 
-	// If the format had no placeholder tokens at all, just emit the integer.
-	// Also covers formats like ".00" where the integer part precedes the
-	// decimal but has no explicit placeholder token (afterDecimal is true but
-	// intConsumed is false): emit intStr before the already-emitted decimal+frac.
-	if !intConsumed && !afterDecimal {
+	// If the format had placeholder tokens but none consumed the integer part,
+	// emit it now.  This covers edge cases like ".00" (integer precedes the
+	// decimal but has no explicit integer-side placeholder token).
+	// Do NOT emit for literal-only sections (hasDigitPlaceholder==false): a
+	// section such as `[<0]"neg "` is intentionally literal-only and should
+	// not have any numeric digits appended.
+	if !intConsumed && !afterDecimal && m.hasDigitPlaceholder {
 		sb.WriteString(intStr)
 	} else if !intConsumed && afterDecimal {
 		// ".00"-style: no integer placeholder, so intStr was never emitted.
@@ -999,11 +1122,24 @@ func renderNumber(val float64, sec nfp.Section, sections []nfp.Section) string {
 		}
 	}
 
-	// Guard: if nothing was written (e.g. a format string whose only tokens
-	// are colours, conditions, or other non-output tokens), fall back to the
-	// raw value so the numeric value is never silently dropped.
+	// Guard: if nothing was written, decide whether to fall back to renderGeneral.
+	//   • Section has only decorative tokens (Color/Condition, no output tokens
+	//     at all, e.g. "[Red]"): fall back so the numeric value is never dropped.
+	//   • Section has output tokens but none are digit placeholders (literal-only,
+	//     e.g. `[<0]"neg "` or `[=0]"zero"`): empty string is correct — return as-is.
+	//   • Section has digit placeholders and hash suppression produced "": return "".
+	//   • Section has digit placeholders but rendered nothing for another reason
+	//     (shouldn't normally happen): fall back to renderGeneral as a safety net.
 	if sb.Len() == 0 {
-		return renderGeneral(val)
+		if !m.hasOutputToken {
+			// Colour-only or condition-only section — fall back to raw value.
+			return renderGeneral(val)
+		}
+		if m.hasDigitPlaceholder && !hashSuppressed {
+			// Digit placeholders exist but produced no output unexpectedly.
+			return renderGeneral(val)
+		}
+		// Literal-only section or intentional hash suppression: return "".
 	}
 
 	return sb.String()
