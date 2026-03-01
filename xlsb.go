@@ -54,6 +54,8 @@
 // [IsDateFormat] checks whether a number-format ID (and optional custom format
 // string) represents a date or datetime format.  It is a lower-level helper for
 // callers that inspect format metadata without going through [workbook.Workbook.FormatCell].
+// Internal packages (workbook, numfmt) use a broader version that also recognises
+// time-only built-in IDs 18–21.
 package xlsb
 
 import (
@@ -67,7 +69,7 @@ import (
 )
 
 // Version is the current version of the go-xlsb library.
-const Version = "1.1.0"
+const Version = "1.1.1"
 
 // Open opens the named .xlsb file.  The caller must call Close on the returned
 // Workbook when done.
@@ -213,12 +215,14 @@ func serialToFracSec(serial float64) (fracSec int64, dayRollover int) {
 // Note: built-in time-only IDs 18–21 (h:mm AM/PM, h:mm:ss AM/PM, h:mm,
 // h:mm:ss) are intentionally excluded; those formats carry no calendar date
 // component and converting them to [time.Time] is usually not meaningful.
-// Use the internal isDateFormatID copies (in workbook/ and styles/) when
+// Use the internal isDateFormatID copies (in workbook/ and numfmt/) when
 // rendering number-formatted output that includes time-only formats.
 //
-// For custom formats the function scans the unquoted portion of formatStr for
-// any of the characters d, D, m, M, y, Y, h, H.  Sections enclosed in double
-// quotes or square brackets are skipped.
+// For custom formats the function delegates to [dateformat.ScanFormatStr], which
+// scans the unquoted portion of formatStr for the characters d, D, m, M, y, Y,
+// h, H, s, S, and e/E (when not preceded by a digit placeholder — otherwise e/E
+// is a scientific-notation exponent).  Sections enclosed in double quotes or
+// square brackets are skipped.
 func IsDateFormat(id int, formatStr string) bool {
 	// Built-in date/time numFmtIds.
 	switch {

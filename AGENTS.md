@@ -9,7 +9,7 @@ in this repository. Keep it up-to-date when conventions change.
 
 **Module:** `github.com/TsubasaBE/go-xlsb`  
 **Language:** Go (`go 1.25` in `go.mod`; minimum runtime required is Go 1.22)  
-**External dependencies:** None — pure stdlib only  
+**External dependencies:** `github.com/xuri/nfp` (number format token parser)  
 **License:** LGPL-3.0-or-later  
 
 A pure-Go reader for the Excel Binary Workbook (`.xlsb`) format, ported from the
@@ -20,8 +20,13 @@ Python library [pyxlsb](https://github.com/willtrnr/pyxlsb) by William Turner.
 ```
 go-xlsb/           ← root package `xlsb`; public API (Open, OpenReader, ConvertDate)
 ├── biff12/        ← BIFF12 record-ID constants (pure const table, no logic)
+├── internal/
+│   ├── dateformat/ ← isDateFormat helper shared by workbook/ and numfmt/
+│   └── rels/       ← shared XML relationship types (xmlRelationships, xmlRelationship)
+├── numfmt/        ← number format rendering (FormatValue)
 ├── record/        ← low-level BIFF12 stream reader + typed field reader
 ├── stringtable/   ← shared-string table (SST) parser
+├── styles/        ← styles.bin parser; XFStyle, StyleTable, BuiltInNumFmt
 ├── workbook/      ← ZIP opener, sheet list, relationship XML
 ├── worksheet/     ← per-sheet parser + Rows() iterator
 ├── xls/           ← real .xlsb fixtures (gitignored); used by integration tests
@@ -144,8 +149,8 @@ import (
 )
 ```
 
-There is no third-party block (no external dependencies). If one is ever added, it
-becomes a third block between stdlib and internal.
+There is one external dependency (`github.com/xuri/nfp`). If additional third-party
+packages are ever added, they form a third import block between stdlib and internal.
 
 ### Naming
 
@@ -238,16 +243,16 @@ becomes a third block between stdlib and internal.
   row data begins (`dataOffset`). Every call to `Rows()` seeks back to `dataOffset` and
   streams rows on demand. Keep this contract intact when modifying worksheet parsing.
 - **`Rows(sparse bool)`:** when `sparse` is false (dense mode), every row is padded to
-  the full sheet width. `Rows()` also maintains `anchorValues map[[2]int]any` to
-  propagate anchor-cell values into non-anchor rows of vertical merges.
+  the full sheet width. Only the anchor cell of a merged region carries a value;
+  satellite cells (other rows/columns of the merge) are emitted as zero-value `Cell`
+  entries. Use `MergeCells` in application code to propagate anchor values if needed.
 - **No global state.** All state is held in struct fields.
 - **Zero allocations on the hot path** is a goal. Avoid unnecessary heap allocations
   inside `Rows()` loops.
 - **The `biff12` package** is a pure constant table — no logic, no init side-effects.
-- **XML struct duplication:** `parseRelsXML` and the `xmlRelationships`/`xmlRelationship`
-  types appear in both `workbook/workbook.go` and `worksheet/worksheet.go`. This is
-  intentional to avoid a circular import. Do not refactor them into a shared package
-  without carefully checking the import graph.
+- **`internal/rels` package:** the `xmlRelationships` and `xmlRelationship` types and
+  the `parseRelsXML` function live in `internal/rels/rels.go` (`package rels`). Both
+  `workbook/workbook.go` and `worksheet/worksheet.go` import this shared package.
 - **`_probe.go`** has `//go:build ignore` and is `package main`. It is a developer
   convenience tool for dumping sheet metadata from files in `xls/`. It is never
   compiled as part of the library and should not be modified during normal development.

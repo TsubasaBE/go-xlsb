@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-03-01
+
+### Added
+
+- `numfmt`: conditional section selection — bracket-condition tokens (`[>=1000]`,
+  `[<0]`, `[=0]`, `[<>0]`, etc.) are now evaluated in order; the first matching
+  section is selected and its value rendered as `math.Abs(val)` (sign semantics are
+  encoded by the condition itself), matching Excel's behaviour.  When no condition
+  matches, the last unconditional section is used as the fallback.
+- `numfmt`: `#` placeholder zero suppression — a pure-hash integer format (e.g. `#`,
+  `#.##`, `#,###`) with a zero value now produces `""` instead of `"0"`, and `0.5`
+  with `#.##` produces `".5"` instead of `"0.5"`, matching Excel.
+- `numfmt`: `currencySymbol` now correctly ignores color-bracket tokens (`[Red]`,
+  `[Color N]`) that the nfp parser classifies as `CurrencyLanguage`; they are treated
+  as decorative and no longer leak digits into the rendered output.
+- `numfmt`: literal-only sections (e.g. `[<0]"neg "`) no longer have numeric digits
+  appended when neither `intConsumed` nor `afterDecimal` is set.
+- Tests: `TestFormatValueConditionalSections`, `TestFormatValueHashZeroSuppression`,
+  `TestFormatValueScientificSignWrapper`, `TestFormatValueFractionSignWrapper`, and
+  `TestFormatValueColorToken` added to `xlsb_test.go`.
+
 ## [1.1.0] - 2026-02-28
 
 ### Added
@@ -65,7 +86,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `worksheet.parseColRecord`: added a `maxStyleIndex` (`0x7FFFFFFF`) bounds
   check on the raw `uint32` style index before casting to `int`.  A corrupt
   value above `math.MaxInt32` previously produced a different `int` result on
-  32-bit vs 64-bit platforms; it now returns a descriptive error on all
+  32-bit vs 64-bit platforms; it is now clamped to style index 0 on all
   platforms.
 
 ## [1.0.1] - 2026-02-28
@@ -105,7 +126,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `docs/official_microsoft_xlsb_format_documentation.pdf` removed from the
   repository; added to `.gitignore`.
 
-[Unreleased]: https://github.com/TsubasaBE/go-xlsb/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/TsubasaBE/go-xlsb/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/TsubasaBE/go-xlsb/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/TsubasaBE/go-xlsb/compare/v1.0.2...v1.1.0
 [1.0.2]: https://github.com/TsubasaBE/go-xlsb/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/TsubasaBE/go-xlsb/compare/v1.0.0...v1.0.1

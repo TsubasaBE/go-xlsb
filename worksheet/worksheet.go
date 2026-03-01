@@ -154,11 +154,12 @@ func (ws *Worksheet) FormatCell(cell Cell) string {
 // nil-valued Cells (matching pyxlsb behaviour).  When sparse is true only rows
 // that contain at least one record are yielded.
 //
-// Merged-cell regions are reflected faithfully from the underlying binary
-// storage: only the anchor cell (top-left of the region) carries a value;
-// all satellite cells — whether in the same row (horizontal merge) or a
-// subsequent row (vertical merge) — return nil, matching the behaviour of
-// excelize's GetRows.
+// Merged-cell regions are reflected as stored in the binary stream: only the
+// anchor cell (top-left of the merged region) carries a value; all satellite
+// cells — whether in the same row (horizontal merge) or subsequent rows
+// (vertical merge) — have a nil value.  Use [Worksheet.MergeCells] to
+// enumerate the merged ranges and propagate anchor values in application code
+// if needed.
 //
 // If the underlying stream is truncated or corrupt, iteration stops early and
 // ws.Err is set to a non-nil error.  Callers must check ws.Err immediately
