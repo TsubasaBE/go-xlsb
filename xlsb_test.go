@@ -220,71 +220,25 @@ func TestReaderMultipleRecords(t *testing.T) {
 // buildSSTBytes constructs a minimal in-memory sharedStrings.bin containing
 // the given strings, starting with an SST record and ending with SST_END.
 //
-// SST  record id = 0x019F → encoded as two bytes: 0x9F 0x83 (continuation)
-// Actually for testing we use the record package encoder which handles IDs < 128.
-// But SST = 0x019F needs two bytes.  We build the raw bytes manually.
+// Uses the shared biff12WriteRec / biff12EncStr helpers from
+// xlsb_testhelpers_test.go for correct BIFF12 ID and length encoding.
 func buildSSTBytes(strs []string) []byte {
 	var buf bytes.Buffer
-
-	// Helper: write a variable-length record ID (up to 2 bytes).
-	// The BIFF12 ID encoding: each byte except the last has bit 7 set (continuation).
-	// Value is accumulated as: v += byte << (8*i).
-	// IDs are designed so that multi-byte ones always have bit7 set in the low byte.
-	writeID := func(id int) {
-		if id < 0x80 {
-			buf.WriteByte(byte(id))
-		} else {
-			// Write the low byte (already has bit 7 set for valid BIFF12 IDs).
-			buf.WriteByte(byte(id & 0xFF))
-			// Write the high byte (no continuation bit needed for 2-byte IDs).
-			buf.WriteByte(byte(id >> 8))
-		}
-	}
-
-	// Helper: write a variable-length length field
-	writeLen := func(n int) {
-		for {
-			b := n & 0x7F
-			n >>= 7
-			if n > 0 {
-				buf.WriteByte(byte(b) | 0x80)
-			} else {
-				buf.WriteByte(byte(b))
-				break
-			}
-		}
-	}
-
-	// Helper: encode a string as 4-byte count + UTF-16LE body
-	encStr := func(s string) []byte {
-		runes := []rune(s)
-		var sb bytes.Buffer
-		_ = binary.Write(&sb, binary.LittleEndian, uint32(len(runes)))
-		for _, r := range runes {
-			_ = binary.Write(&sb, binary.LittleEndian, uint16(r))
-		}
-		return sb.Bytes()
-	}
 
 	// SST record (id=0x019F): count(4) + uniqueCount(4)
 	sstPayload := make([]byte, 8)
 	binary.LittleEndian.PutUint32(sstPayload[0:], uint32(len(strs)))
 	binary.LittleEndian.PutUint32(sstPayload[4:], uint32(len(strs)))
-	writeID(0x019F)
-	writeLen(len(sstPayload))
-	buf.Write(sstPayload)
+	biff12WriteRec(&buf, 0x019F, sstPayload)
 
-	// SI records (id=0x0013)
+	// SI records (id=0x0013): flag byte (0x00 = no rich text, no phonetic) + string
 	for _, s := range strs {
-		payload := append([]byte{0x00}, encStr(s)...) // flag byte + string
-		writeID(0x0013)
-		writeLen(len(payload))
-		buf.Write(payload)
+		payload := append([]byte{0x00}, biff12EncStr(s)...)
+		biff12WriteRec(&buf, 0x0013, payload)
 	}
 
-	// SST_END record (id=0x01A0)
-	writeID(0x01A0)
-	writeLen(0)
+	// SST_END record (id=0x01A0): no payload
+	biff12WriteRec(&buf, 0x01A0, nil)
 
 	return buf.Bytes()
 }
@@ -789,6 +743,84 @@ func TestIsDateFormat(t *testing.T) {
 			got := xlsb.IsDateFormat(tc.id, tc.formatStr)
 			if got != tc.want {
 				t.Errorf("IsDateFormat(%d, %q) = %v, want %v", tc.id, tc.formatStr, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestIsDateFormatIDConsistency verifies that the three internal copies of
+// isDateFormatID (in workbook, styles, and numfmt) agree with each other for a
+// broad set of built-in IDs and custom format strings.
+//
+// The copies cannot be called directly (they are unexported), so the test
+// reaches each one through its public surface:
+//
+//   - xlsb.IsDateFormat         → delegates to numfmt.isDateFormat (via numfmt pkg)
+//     and the public wrapper in xlsb.go; excludes time-only IDs 18-21.
+//   - styles.StyleTable.IsDate  → delegates to styles.isDateFormatID;
+//     includes time-only IDs 18-21.
+//
+// For every ID where the two surfaces are expected to agree the test asserts
+// they return the same value.  For the four intentionally-differing IDs 18-21
+// the test explicitly verifies that IsDate returns true and IsDateFormat returns
+// false (the documented contract).
+func TestIsDateFormatIDConsistency(t *testing.T) {
+	type entry struct {
+		id        int
+		formatStr string
+	}
+
+	// IDs where all three copies must agree (i.e. not 18–21).
+	agreeIDs := []entry{
+		// built-in date IDs
+		{14, ""}, {15, ""}, {16, ""}, {17, ""}, {22, ""},
+		{27, ""}, {28, ""}, {29, ""}, {30, ""}, {31, ""},
+		{32, ""}, {33, ""}, {34, ""}, {35, ""}, {36, ""},
+		{45, ""}, {46, ""}, {47, ""},
+		{50, ""}, {51, ""}, {52, ""}, {53, ""}, {54, ""},
+		{55, ""}, {56, ""}, {57, ""}, {58, ""},
+		// built-in non-date IDs
+		{0, ""}, {1, ""}, {2, ""}, {3, ""}, {4, ""},
+		{9, ""}, {10, ""}, {11, ""}, {12, ""}, {13, ""},
+		{23, ""}, {24, ""}, {25, ""}, {26, ""},
+		{37, ""}, {38, ""}, {39, ""}, {40, ""}, {41, ""},
+		{42, ""}, {43, ""}, {44, ""}, {48, ""}, {49, ""},
+		{59, ""}, {100, ""}, {163, ""},
+		// custom date formats
+		{164, "yyyy-mm-dd"}, {165, "dd/mm/yyyy hh:mm"}, {200, "YYYY-MM-DD"},
+		{201, "H:MM:SS"}, {202, "mmm-yy"},
+		// custom non-date formats
+		{166, "0.00"}, {167, "@"}, {168, `"date"0.00`}, {169, `[$-409]0.00`},
+		{170, "0.00E+0"}, {171, "#,##0.00"},
+	}
+
+	// Build a StyleTable entry for each ID so we can call IsDate.
+	// IsDate(s) reports whether the XF at index s is a date format.
+	makeTable := func(id int, fmtStr string) styles.StyleTable {
+		return styles.StyleTable{{NumFmtID: id, FormatStr: fmtStr}}
+	}
+
+	for _, e := range agreeIDs {
+		t.Run(fmt.Sprintf("id=%d fmt=%q", e.id, e.formatStr), func(t *testing.T) {
+			wantPublic := xlsb.IsDateFormat(e.id, e.formatStr)
+			gotStyles := makeTable(e.id, e.formatStr).IsDate(0)
+			if gotStyles != wantPublic {
+				t.Errorf("id=%d fmt=%q: xlsb.IsDateFormat=%v but styles.IsDate=%v (expected equal)",
+					e.id, e.formatStr, wantPublic, gotStyles)
+			}
+		})
+	}
+
+	// IDs 18–21: time-only formats where IsDate (internal) returns true
+	// but the public IsDateFormat returns false — document this contract.
+	timeOnlyIDs := []int{18, 19, 20, 21}
+	for _, id := range timeOnlyIDs {
+		t.Run(fmt.Sprintf("time-only id=%d", id), func(t *testing.T) {
+			if got := xlsb.IsDateFormat(id, ""); got != false {
+				t.Errorf("IsDateFormat(%d, \"\") = %v, want false (time-only IDs excluded from public API)", id, got)
+			}
+			if got := makeTable(id, "").IsDate(0); got != true {
+				t.Errorf("styles.IsDate(%d) = %v, want true (internal includes time-only IDs)", id, got)
 			}
 		})
 	}

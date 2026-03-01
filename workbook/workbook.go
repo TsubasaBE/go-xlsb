@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"path"
 	"strings"
 
 	"github.com/TsubasaBE/go-xlsb/biff12"
@@ -236,8 +237,6 @@ func (wb *Workbook) parseWorkbook() error {
 				return fmt.Errorf("workbook: parse SHEET record: %w", err)
 			}
 			wb.sheets = append(wb.sheets, entry)
-		case biff12.SheetsEnd:
-			return nil
 		}
 	}
 	return nil
@@ -375,6 +374,10 @@ func (wb *Workbook) openSheet(entry sheetEntry) (*worksheet.Worksheet, error) {
 	} else {
 		zipPath = "xl/" + target
 	}
+	// Normalise any ".." segments that appear in relative targets such as
+	// "../xl/worksheets/sheet1.bin" so the resulting path matches the ZIP
+	// index (which stores entries without redundant path components).
+	zipPath = path.Clean(zipPath)
 
 	data, err := wb.readZipEntry(zipPath)
 	if err != nil {

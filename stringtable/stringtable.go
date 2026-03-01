@@ -59,19 +59,44 @@ func (st *StringTable) Len() int {
 
 // parseSI decodes a single SI (string instance) record payload.
 //
-// The Python handler does:
+// BrtSi layout per MS-XLSB §2.4.726:
 //
-//	reader.skip(1)          # skip one flag byte
-//	val = reader.read_string()
+//	flags    uint8   — bit 0: fRichStr (rich-text run data follows string)
+//	                   bit 1: fExtStr  (phonetic/extended data follows)
+//	if fRichStr: crun uint32  — number of rich-text run entries
+//	if fExtStr:  sz   uint32  — byte size of phonetic data
+//	string   XLWideString    — the actual text (4-byte char count + UTF-16LE)
+//
+// (Rich-text run records and phonetic data follow the string in the record
+// stream, not the record payload, so we do not need to skip them here.)
 func parseSI(data []byte) (string, error) {
 	if len(data) == 0 {
 		return "", nil
 	}
 	rr := record.NewRecordReader(data)
-	if err := rr.Skip(1); err != nil {
-		// No data beyond the flag byte — treat as empty string.
+
+	// Read the flag byte.
+	flags, err := rr.ReadUint8()
+	if err != nil {
+		// No data at all — treat as empty string.
 		return "", nil
 	}
+	fRichStr := (flags & 0x01) != 0
+	fExtStr := (flags & 0x02) != 0
+
+	// If fRichStr is set, a 4-byte crun count follows before the string.
+	if fRichStr {
+		if _, err := rr.ReadUint32(); err != nil {
+			return "", fmt.Errorf("parseSI: read crun: %w", err)
+		}
+	}
+	// If fExtStr is set, a 4-byte phonetic-data size follows.
+	if fExtStr {
+		if _, err := rr.ReadUint32(); err != nil {
+			return "", fmt.Errorf("parseSI: read extStr size: %w", err)
+		}
+	}
+
 	s, err := rr.ReadString()
 	if err != nil {
 		return "", fmt.Errorf("parseSI: %w", err)

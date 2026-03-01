@@ -46,12 +46,22 @@ func IsBuiltInDateID(id int) bool {
 //   - y, Y — year
 //   - h, H — hour
 //   - s, S — second
-//   - e, E — Japanese era (only when NOT preceded by a digit placeholder
-//     0, #, ?, or .)
+//   - e, E — Japanese era (only when NOT immediately preceded by a digit
+//     placeholder 0, #, ?, or . anywhere outside quotes/brackets)
 func ScanFormatStr(formatStr string) bool {
 	inDoubleQuote := false
 	inBracket := false
-	var prev rune
+	// lastDP tracks the last digit-placeholder character (0, #, ?, .) seen
+	// outside quotes and brackets.  It is used exclusively to decide whether
+	// E/e is a scientific-notation exponent (preceded by a placeholder) or a
+	// Japanese era date token.  It is kept separate from a general "previous
+	// character" variable so that intervening non-placeholder characters such
+	// as ')' or '+' do not mask the placeholder relationship.
+	//
+	// Example: "0.00E+0" — lastDP is '0' at 'E', so E is scientific notation.
+	// Example: "(0)E+0" — lastDP is '0' at 'E' (the '(' and ')' are ignored),
+	// so E is correctly classified as scientific notation, not a date token.
+	var lastDP rune
 	for _, ch := range formatStr {
 		switch {
 		case inDoubleQuote:
@@ -73,15 +83,18 @@ func ScanFormatStr(formatStr string) bool {
 			ch == 's' || ch == 'S':
 			return true
 		case ch == 'e' || ch == 'E':
-			// E/e is a scientific-notation exponent marker when preceded by a
-			// digit placeholder (0, #, ?) — in that context it is NOT a date
-			// token.  Only treat it as the Japanese era date token otherwise.
-			if prev != '0' && prev != '#' && prev != '?' && prev != '.' {
+			// E/e is a scientific-notation exponent marker when the most recent
+			// digit placeholder (0, #, ?, .) preceded it — in that context it
+			// is NOT a date token.  Only treat it as the Japanese era date
+			// token otherwise.
+			if lastDP != '0' && lastDP != '#' && lastDP != '?' && lastDP != '.' {
 				return true
 			}
 		}
 		if !inDoubleQuote && !inBracket {
-			prev = ch
+			if ch == '0' || ch == '#' || ch == '?' || ch == '.' {
+				lastDP = ch
+			}
 		}
 	}
 	return false

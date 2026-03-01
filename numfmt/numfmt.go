@@ -602,16 +602,20 @@ func renderDateToken(upper string, t time.Time, serial float64, hasAmPm bool, la
 //   - [mm]       → total elapsed minutes (no modulo)
 //   - [ss]       → total elapsed seconds (no modulo)
 //
+// roundEpsilon is added before truncation to prevent floating-point drift
+// from causing values that are exactly on a whole-unit boundary (e.g. exactly
+// 48 hours) to truncate one unit too low due to representational error.
+//
 // int64 is used throughout to avoid overflow on 32-bit platforms when the
 // serial represents a large elapsed duration (e.g. many thousands of hours).
 func renderElapsed(upper string, serial float64) string {
 	switch upper {
 	case "H", "HH":
-		return strconv.FormatInt(int64(serial*24), 10)
+		return strconv.FormatInt(int64(serial*24+roundEpsilon), 10)
 	case "MM":
-		return strconv.FormatInt(int64(serial*24*60), 10)
+		return strconv.FormatInt(int64(serial*24*60+roundEpsilon), 10)
 	case "SS":
-		return strconv.FormatInt(int64(serial*24*3600), 10)
+		return strconv.FormatInt(int64(serial*24*3600+roundEpsilon), 10)
 	}
 	return ""
 }
@@ -866,26 +870,18 @@ func renderNumber(val float64, sec nfp.Section, sections []nfp.Section) string {
 			needsMinus = true
 		} else {
 			// Two+ sections: check whether the negative section (sec) contains
-			// a visual sign indicator — parentheses, minus, or plus literals,
-			// or a colour token ([Red], [Blue], etc.).  A colour-only negative
-			// section (e.g. "0;[Red]0") uses the colour as the visual
-			// distinction, so the caller must NOT also prepend a minus.
+			// a visual sign indicator — parentheses, minus, or plus literals.
+			// A colour modifier alone (e.g. "0;[Red]0") does NOT suppress the
+			// minus sign; Excel still renders "-5" in red for that format.
 			// (E.g. "0;0" has no wrapper → "-5" not "5".)
 			hasSignWrapper := false
 			for _, tok := range sec.Items {
-				switch tok.TType {
-				case nfp.TokenTypeLiteral:
+				if tok.TType == nfp.TokenTypeLiteral {
 					if tok.TValue == "(" || tok.TValue == ")" ||
 						tok.TValue == "-" || tok.TValue == "+" {
 						hasSignWrapper = true
+						break
 					}
-				case nfp.TokenTypeColor:
-					// A colour modifier on the negative section is itself
-					// the visual sign indicator.
-					hasSignWrapper = true
-				}
-				if hasSignWrapper {
-					break
 				}
 			}
 			if !hasSignWrapper {
@@ -1274,12 +1270,21 @@ func renderFraction(val float64, sec nfp.Section, sections []nfp.Section) string
 		// Fixed-denominator format (e.g. "# ?/4"): compute nearest numerator.
 		num = int(math.Round(frac * float64(fixedDen)))
 		den = fixedDen
-	} else {
+	} else if hasIntPart {
+		// Mixed-number format (e.g. "# ??/??"):  only the fractional part is
+		// approximated; the integer part is rendered separately.
 		num, den = bestFraction(frac, maxDen)
+	} else {
+		// Improper-fraction format (e.g. "??/??"):  the whole value (including
+		// any integer part) is approximated as a single p/q with q ≤ maxDen.
+		num, den = bestImproperFraction(frac, maxDen)
 	}
 
-	// Carry: if num/den rounds to 1, increment integer part.
-	if den > 0 && num >= den {
+	// Carry: for mixed-number formats only, if the fractional approximation
+	// rounds to 1 (num == den), fold it back into the integer part.
+	// This is not needed for improper fractions because bestImproperFraction
+	// already approximates the whole value as a single p/q.
+	if hasIntPart && den > 0 && num >= den {
 		intPart++
 		num = 0
 		den = 1
@@ -1381,6 +1386,23 @@ func renderFraction(val float64, sec nfp.Section, sections []nfp.Section) string
 		return renderGeneral(val)
 	}
 	return sb.String()
+}
+
+// bestImproperFraction finds the best rational approximation p/q of x ≥ 0
+// such that q ≤ maxDen and |x - p/q| is minimised.  Unlike bestFraction, it
+// handles x ≥ 1 (improper fractions) by decomposing x = floor(x) + frac and
+// delegating the fractional part to bestFraction, then reconstructing the
+// improper numerator as floor(x)*q + frac_p.
+func bestImproperFraction(x float64, maxDen int) (num, den int) {
+	if x <= 0 {
+		return 0, 1
+	}
+	intPart := int(math.Trunc(x))
+	frac := x - float64(intPart)
+	// Use bestFraction for the fractional part.
+	fracNum, fracDen := bestFraction(frac, maxDen)
+	// Reconstruct improper numerator.
+	return intPart*fracDen + fracNum, fracDen
 }
 
 // bestFraction finds the best rational approximation p/q of x such that

@@ -161,8 +161,20 @@ func (ws *Worksheet) FormatCell(cell Cell) string {
 // excelize's GetRows.
 //
 // If the underlying stream is truncated or corrupt, iteration stops early and
-// ws.Err is set to a non-nil error.  Callers should check ws.Err after the
-// range loop to distinguish a clean end-of-data from an error.
+// ws.Err is set to a non-nil error.  Callers must check ws.Err immediately
+// after the range loop completes:
+//
+//	for row := range ws.Rows(false) {
+//	    // process row ...
+//	}
+//	if ws.Err != nil {
+//	    // handle truncated / corrupt stream
+//	}
+//
+// IMPORTANT: ws.Err is cleared to nil at the start of each call to Rows.
+// If you call Rows a second time (e.g. to re-scan the sheet), any error
+// recorded by a previous iteration will be lost.  Always check ws.Err
+// before making another call to Rows.
 //
 // Rows uses Go 1.22+ range-over-func semantics.
 func (ws *Worksheet) Rows(sparse bool) func(yield func([]Cell) bool) {
